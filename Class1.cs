@@ -26,7 +26,6 @@ namespace VSEvolutionHelper
         {
             LoggerInstance.Msg("VSEvolutionHelper initialized!");
 
-
             harmonyInstance = new HarmonyLib.Harmony("com.nihil.vsevolutionhelper");
             harmonyInstance.PatchAll(typeof(VSEvolutionHelper).Assembly);
         }
@@ -43,8 +42,12 @@ namespace VSEvolutionHelper
         {
             try
             {
-                // Debug: log when this is called
-                MelonLogger.Msg($"[SetWeaponData] Called: type={type}, page={page != null}, baseData={baseData?.name ?? "null"}");
+                // Auto-close any existing arcana popup when level-up cards refresh
+                if (currentPopup != null)
+                {
+                    UnityEngine.Object.Destroy(currentPopup);
+                    currentPopup = null;
+                }
 
                 if (baseData == null) return;
 
@@ -96,6 +99,14 @@ namespace VSEvolutionHelper
                 {
                     // This is a regular weapon (or weapon combo) - show single evolution formula
                     BuildWeaponFormula(__instance, page, type, baseData, weaponsDict, powerUpsDict);
+                }
+
+                // Check if this weapon is affected by the player's selected arcana
+                var arcanaInfo = GetActiveArcanaForWeapon(page, type);
+                if (arcanaInfo.HasValue)
+                {
+                    var affectedWeaponTypes = GetArcanaAffectedWeaponTypes(arcanaInfo.Value.arcanaData);
+                    DisplayArcanaIndicator(__instance, arcanaInfo.Value.name, arcanaInfo.Value.description, arcanaInfo.Value.sprite, affectedWeaponTypes, weaponsDict, powerUpsDict);
                 }
             }
             catch (System.Exception ex)
@@ -865,6 +876,705 @@ namespace VSEvolutionHelper
             }
         }
 
+        // Arcana system helpers
+        private static System.Type cachedArcanaTypeEnum = null;
+        private static object cachedAllArcanas = null;
+
+        /// <summary>
+        /// Gets the ArcanaType enum value for the currently selected arcana.
+        /// Returns null if no arcana is selected or arcanas are disabled.
+        /// </summary>
+        public static object GetSelectedArcanaType(LevelUpPage page)
+        {
+            try
+            {
+                // Note: page parameter is not actually used - we find GameManager directly
+                var assembly = typeof(WeaponData).Assembly;
+
+                // Cache the ArcanaType enum
+                if (cachedArcanaTypeEnum == null)
+                {
+                    cachedArcanaTypeEnum = assembly.GetTypes().FirstOrDefault(t => t.Name == "ArcanaType");
+                }
+                if (cachedArcanaTypeEnum == null) return null;
+
+                // Get GameManager -> ArcanaManager -> PlayerOptions -> Config -> SelectedArcana
+                var gameManagerType = assembly.GetTypes().FirstOrDefault(t => t.Name == "GameManager" && !t.IsInterface && typeof(UnityEngine.Component).IsAssignableFrom(t));
+                if (gameManagerType == null) return null;
+
+                var findMethod = typeof(UnityEngine.Object).GetMethods()
+                    .FirstOrDefault(m => m.Name == "FindObjectOfType" && m.IsGenericMethod && m.GetParameters().Length == 0);
+                if (findMethod == null) return null;
+
+                var genericFind = findMethod.MakeGenericMethod(gameManagerType);
+                var gameMgr = genericFind.Invoke(null, null);
+                if (gameMgr == null) return null;
+
+                var amProp = gameMgr.GetType().GetProperty("_arcanaManager", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (amProp == null) return null;
+
+                var arcanaMgr = amProp.GetValue(gameMgr);
+                if (arcanaMgr == null) return null;
+
+                var poProp = arcanaMgr.GetType().GetProperty("_playerOptions", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (poProp == null) return null;
+
+                var playerOpts = poProp.GetValue(arcanaMgr);
+                if (playerOpts == null) return null;
+
+                var configProp = playerOpts.GetType().GetProperty("Config", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (configProp == null) return null;
+
+                var config = configProp.GetValue(playerOpts);
+                if (config == null) return null;
+
+                var selectedArcanaProp = config.GetType().GetProperty("SelectedArcana", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (selectedArcanaProp == null) return null;
+
+                var selectedArcanaInt = (int)selectedArcanaProp.GetValue(config);
+
+                // Check if arcanas are enabled (SelectedMazzo = true)
+                var selectedMazzoProp = config.GetType().GetProperty("SelectedMazzo", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (selectedMazzoProp != null)
+                {
+                    var mazzoEnabled = (bool)selectedMazzoProp.GetValue(config);
+                    if (!mazzoEnabled) return null; // Arcanas disabled
+                }
+
+                // Convert int to ArcanaType enum
+                var arcanaValues = System.Enum.GetValues(cachedArcanaTypeEnum);
+                foreach (var val in arcanaValues)
+                {
+                    if ((int)val == selectedArcanaInt)
+                    {
+                        return val;
+                    }
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Gets the ArcanaData for a given ArcanaType enum value.
+        /// </summary>
+        public static object GetArcanaData(LevelUpPage page, object arcanaType)
+        {
+            if (page == null || page.Data == null) return null;
+            return GetArcanaDataFromDataManager(page.Data, arcanaType);
+        }
+
+        /// <summary>
+        /// Gets the ArcanaData for a given ArcanaType enum value using a DataManager.
+        /// </summary>
+        public static object GetArcanaDataFromDataManager(object dataManager, object arcanaType)
+        {
+            try
+            {
+                if (dataManager == null || arcanaType == null) return null;
+
+                // Cache AllArcanas dictionary
+                if (cachedAllArcanas == null)
+                {
+                    var allArcanasProp = dataManager.GetType().GetProperty("AllArcanas", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (allArcanasProp != null)
+                    {
+                        cachedAllArcanas = allArcanasProp.GetValue(dataManager);
+                    }
+                }
+                if (cachedAllArcanas == null) return null;
+
+                // Get the arcana data from the dictionary
+                var indexer = cachedAllArcanas.GetType().GetProperty("Item");
+                if (indexer == null) return null;
+
+                return indexer.GetValue(cachedAllArcanas, new object[] { arcanaType });
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Checks if a WeaponType is in the arcana's weapons list.
+        /// </summary>
+        public static bool IsWeaponAffectedByArcana(WeaponType weaponType, object arcanaData)
+        {
+            try
+            {
+                if (arcanaData == null) return false;
+
+                var weaponsProp = arcanaData.GetType().GetProperty("weapons", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (weaponsProp == null) return false;
+
+                var weapons = weaponsProp.GetValue(arcanaData);
+                if (weapons == null) return false;
+
+                var countProp = weapons.GetType().GetProperty("Count");
+                if (countProp == null) return false;
+
+                int count = (int)countProp.GetValue(weapons);
+                if (count == 0) return false;
+
+                var itemProp = weapons.GetType().GetProperty("Item");
+                if (itemProp == null) return false;
+
+                int targetValue = (int)weaponType;
+
+                for (int i = 0; i < count; i++)
+                {
+                    var w = itemProp.GetValue(weapons, new object[] { i });
+                    if (w == null) continue;
+
+                    // Decode the boxed enum value using pointer offset 16
+                    var il2cppObj = w as Il2CppSystem.Object;
+                    if (il2cppObj != null)
+                    {
+                        try
+                        {
+                            unsafe
+                            {
+                                IntPtr ptr = il2cppObj.Pointer;
+                                int* valuePtr = (int*)((byte*)ptr.ToPointer() + 16);
+                                if (*valuePtr == targetValue)
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Checks if an ItemType (powerup) is in the arcana's items list.
+        /// </summary>
+        public static bool IsItemAffectedByArcana(ItemType itemType, object arcanaData)
+        {
+            try
+            {
+                if (arcanaData == null) return false;
+
+                var itemsProp = arcanaData.GetType().GetProperty("items", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (itemsProp == null) return false;
+
+                var items = itemsProp.GetValue(arcanaData);
+                if (items == null) return false;
+
+                var countProp = items.GetType().GetProperty("Count");
+                if (countProp == null) return false;
+
+                int count = (int)countProp.GetValue(items);
+                if (count == 0) return false;
+
+                var itemProp = items.GetType().GetProperty("Item");
+                if (itemProp == null) return false;
+
+                int targetValue = (int)itemType;
+
+                for (int i = 0; i < count; i++)
+                {
+                    var item = itemProp.GetValue(items, new object[] { i });
+                    if (item == null) continue;
+
+                    // Decode the boxed enum value using pointer offset 16
+                    var il2cppObj = item as Il2CppSystem.Object;
+                    if (il2cppObj != null)
+                    {
+                        try
+                        {
+                            unsafe
+                            {
+                                IntPtr ptr = il2cppObj.Pointer;
+                                int* valuePtr = (int*)((byte*)ptr.ToPointer() + 16);
+                                if (*valuePtr == targetValue)
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Gets arcana info for a powerup/item if it's affected by the currently selected arcana.
+        /// </summary>
+        public static (string name, string description, UnityEngine.Sprite sprite, object arcanaData)? GetActiveArcanaForItem(LevelUpPage page, ItemType itemType)
+        {
+            try
+            {
+                var selectedArcanaType = GetSelectedArcanaType(page);
+                if (selectedArcanaType == null) return null;
+
+                var arcanaData = GetArcanaData(page, selectedArcanaType);
+                if (arcanaData == null) return null;
+
+                if (!IsItemAffectedByArcana(itemType, arcanaData)) return null;
+
+                // Get arcana info and sprite
+                var nameProp = arcanaData.GetType().GetProperty("name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var descProp = arcanaData.GetType().GetProperty("description", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var frameProp = arcanaData.GetType().GetProperty("frameName", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var textureProp = arcanaData.GetType().GetProperty("texture", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+                string name = nameProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string description = descProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string frameName = frameProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string textureName = textureProp?.GetValue(arcanaData)?.ToString() ?? "";
+
+                UnityEngine.Sprite sprite = LoadArcanaSprite(textureName, frameName, arcanaData);
+
+                return (name, description, sprite, arcanaData);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Gets arcana info for a powerup/item using DataManager.
+        /// </summary>
+        public static (string name, string description, UnityEngine.Sprite sprite, object arcanaData)? GetActiveArcanaForItemFromDataManager(object dataManager, ItemType itemType)
+        {
+            try
+            {
+                var selectedArcanaType = GetSelectedArcanaType(null);
+                if (selectedArcanaType == null) return null;
+
+                var arcanaData = GetArcanaDataFromDataManager(dataManager, selectedArcanaType);
+                if (arcanaData == null) return null;
+
+                if (!IsItemAffectedByArcana(itemType, arcanaData)) return null;
+
+                // Get arcana info and sprite
+                var nameProp = arcanaData.GetType().GetProperty("name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var descProp = arcanaData.GetType().GetProperty("description", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var frameProp = arcanaData.GetType().GetProperty("frameName", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var textureProp = arcanaData.GetType().GetProperty("texture", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+                string name = nameProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string description = descProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string frameName = frameProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string textureName = textureProp?.GetValue(arcanaData)?.ToString() ?? "";
+
+                UnityEngine.Sprite sprite = LoadArcanaSprite(textureName, frameName, arcanaData);
+
+                return (name, description, sprite, arcanaData);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Gets arcana info for a weapon if it's affected by the currently selected arcana.
+        /// Returns (arcanaName, arcanaDescription, sprite, arcanaData) or null if not affected.
+        /// </summary>
+        public static (string name, string description, UnityEngine.Sprite sprite, object arcanaData)? GetActiveArcanaForWeapon(LevelUpPage page, WeaponType weaponType)
+        {
+            try
+            {
+                var selectedArcanaType = GetSelectedArcanaType(page);
+                if (selectedArcanaType == null) return null;
+
+                var arcanaData = GetArcanaData(page, selectedArcanaType);
+                if (arcanaData == null) return null;
+
+                if (!IsWeaponAffectedByArcana(weaponType, arcanaData)) return null;
+
+                // Get arcana info
+                var nameProp = arcanaData.GetType().GetProperty("name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var descProp = arcanaData.GetType().GetProperty("description", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var frameProp = arcanaData.GetType().GetProperty("frameName", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var textureProp = arcanaData.GetType().GetProperty("texture", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+                string name = nameProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string description = descProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string frameName = frameProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string textureName = textureProp?.GetValue(arcanaData)?.ToString() ?? "";
+
+                // Get arcana type for searching
+                var arcanaTypeProp = arcanaData.GetType().GetProperty("arcanaType", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                string arcanaTypeStr = arcanaTypeProp?.GetValue(arcanaData)?.ToString() ?? "";
+
+                MelonLogger.Msg($"Arcana: {name}, texture={textureName}, frameName={frameName}, arcanaType={arcanaTypeStr}");
+
+                // Try to load the arcana sprite
+                UnityEngine.Sprite sprite = null;
+
+                // Clean up frameName (remove .png extension if present)
+                string cleanFrameName = frameName;
+                if (cleanFrameName.EndsWith(".png", System.StringComparison.OrdinalIgnoreCase))
+                {
+                    cleanFrameName = cleanFrameName.Substring(0, cleanFrameName.Length - 4);
+                }
+
+                // Method 1: Try to load from the specific texture atlas first (most reliable)
+                if (!string.IsNullOrEmpty(textureName))
+                {
+                    // Try various frame name formats
+                    string[] frameNamesToTry = { frameName, cleanFrameName, $"{cleanFrameName}.png" };
+                    foreach (var fn in frameNamesToTry)
+                    {
+                        sprite = LoadSpriteFromAtlas(fn, textureName);
+                        if (sprite != null)
+                        {
+                            MelonLogger.Msg($"Found arcana sprite in atlas '{textureName}': {fn}");
+                            break;
+                        }
+                    }
+                }
+
+                // Method 2: Search all sprites for one from the correct texture
+                if (sprite == null)
+                {
+                    var allSprites = UnityEngine.Resources.FindObjectsOfTypeAll<UnityEngine.Sprite>();
+
+                    foreach (var s in allSprites)
+                    {
+                        if (s == null || s.texture == null) continue;
+
+                        // Check if this sprite is from the right texture and has the right frame name
+                        string texName = s.texture.name.ToLower();
+                        string spriteName = s.name.ToLower();
+
+                        if (texName.Contains(textureName.ToLower()) &&
+                            (spriteName == cleanFrameName.ToLower() || spriteName == frameName.ToLower()))
+                        {
+                            sprite = s;
+                            MelonLogger.Msg($"Found arcana sprite from texture '{s.texture.name}': {s.name}");
+                            break;
+                        }
+                    }
+                }
+
+                // Method 3: Search for sprites that match the texture name pattern
+                if (sprite == null && !string.IsNullOrEmpty(textureName))
+                {
+                    var allSprites = UnityEngine.Resources.FindObjectsOfTypeAll<UnityEngine.Sprite>();
+
+                    foreach (var s in allSprites)
+                    {
+                        if (s == null || s.texture == null) continue;
+
+                        string texName = s.texture.name.ToLower();
+                        string spriteName = s.name;
+
+                        // Look for sprite from the randomazzo texture with matching number
+                        if (texName.Contains(textureName.ToLower()) && spriteName == cleanFrameName)
+                        {
+                            sprite = s;
+                            MelonLogger.Msg($"Found arcana sprite (texture match): {s.texture.name}/{s.name}");
+                            break;
+                        }
+                    }
+                }
+
+                // Method 4: Fallback - try other atlases
+                if (sprite == null)
+                {
+                    string[] atlasesToTry = { "arcanas", "cards", "items", "ui" };
+                    string[] frameNamesToTry = { frameName, cleanFrameName, $"arcana_{cleanFrameName}" };
+
+                    foreach (var atlas in atlasesToTry)
+                    {
+                        foreach (var fn in frameNamesToTry)
+                        {
+                            sprite = LoadSpriteFromAtlas(fn, atlas);
+                            if (sprite != null)
+                            {
+                                MelonLogger.Msg($"Found arcana sprite in fallback atlas '{atlas}': {fn}");
+                                break;
+                            }
+                        }
+                        if (sprite != null) break;
+                    }
+                }
+
+                if (sprite == null)
+                {
+                    MelonLogger.Warning($"Could not find sprite for arcana: {name} (texture={textureName}, frame={frameName})");
+                }
+
+                return (name, description, sprite, arcanaData);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Gets arcana info for a weapon if it's affected by the currently selected arcana.
+        /// Version that works with DataManager (for ItemFoundPage, merchant, etc.)
+        /// </summary>
+        public static (string name, string description, UnityEngine.Sprite sprite, object arcanaData)? GetActiveArcanaForWeaponFromDataManager(object dataManager, WeaponType weaponType)
+        {
+            try
+            {
+                var selectedArcanaType = GetSelectedArcanaType(null);
+                if (selectedArcanaType == null) return null;
+
+                var arcanaData = GetArcanaDataFromDataManager(dataManager, selectedArcanaType);
+                if (arcanaData == null) return null;
+
+                if (!IsWeaponAffectedByArcana(weaponType, arcanaData)) return null;
+
+                // Get arcana info
+                var nameProp = arcanaData.GetType().GetProperty("name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var descProp = arcanaData.GetType().GetProperty("description", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var frameProp = arcanaData.GetType().GetProperty("frameName", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var textureProp = arcanaData.GetType().GetProperty("texture", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+                string name = nameProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string description = descProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string frameName = frameProp?.GetValue(arcanaData)?.ToString() ?? "";
+                string textureName = textureProp?.GetValue(arcanaData)?.ToString() ?? "";
+
+                // Load the arcana sprite (reuse the existing sprite loading logic)
+                UnityEngine.Sprite sprite = LoadArcanaSprite(textureName, frameName, arcanaData);
+
+                return (name, description, sprite, arcanaData);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Loads an arcana sprite given the texture and frame names.
+        /// </summary>
+        private static UnityEngine.Sprite LoadArcanaSprite(string textureName, string frameName, object arcanaData)
+        {
+            UnityEngine.Sprite sprite = null;
+
+            // Clean up frameName (remove .png extension if present)
+            string cleanFrameName = frameName;
+            if (cleanFrameName.EndsWith(".png", System.StringComparison.OrdinalIgnoreCase))
+            {
+                cleanFrameName = cleanFrameName.Substring(0, cleanFrameName.Length - 4);
+            }
+
+            // Method 1: Try to load from the specific texture atlas first
+            if (!string.IsNullOrEmpty(textureName))
+            {
+                string[] frameNamesToTry = { frameName, cleanFrameName, $"{cleanFrameName}.png" };
+                foreach (var fn in frameNamesToTry)
+                {
+                    sprite = LoadSpriteFromAtlas(fn, textureName);
+                    if (sprite != null) return sprite;
+                }
+            }
+
+            // Method 2: Search all sprites for one from the correct texture
+            var allSprites = UnityEngine.Resources.FindObjectsOfTypeAll<UnityEngine.Sprite>();
+
+            foreach (var s in allSprites)
+            {
+                if (s == null || s.texture == null) continue;
+
+                string texName = s.texture.name.ToLower();
+                string spriteName = s.name.ToLower();
+
+                if (texName.Contains(textureName.ToLower()) &&
+                    (spriteName == cleanFrameName.ToLower() || spriteName == frameName.ToLower()))
+                {
+                    return s;
+                }
+            }
+
+            // Method 3: Search for sprites that match the texture name pattern
+            if (!string.IsNullOrEmpty(textureName))
+            {
+                foreach (var s in allSprites)
+                {
+                    if (s == null || s.texture == null) continue;
+
+                    string texName = s.texture.name.ToLower();
+
+                    if (texName.Contains(textureName.ToLower()) && s.name == cleanFrameName)
+                    {
+                        return s;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Gets the list of affected weapon names from arcana data.
+        /// </summary>
+        public static System.Collections.Generic.List<string> GetArcanaAffectedWeaponNames(object arcanaData, object weaponsDict)
+        {
+            var weaponNames = new System.Collections.Generic.List<string>();
+            try
+            {
+                if (arcanaData == null) return weaponNames;
+
+                var weaponsProp = arcanaData.GetType().GetProperty("weapons", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (weaponsProp == null) return weaponNames;
+
+                var weapons = weaponsProp.GetValue(arcanaData);
+                if (weapons == null) return weaponNames;
+
+                var countProp = weapons.GetType().GetProperty("Count");
+                if (countProp == null) return weaponNames;
+
+                int count = (int)countProp.GetValue(weapons);
+                var itemProp = weapons.GetType().GetProperty("Item");
+                if (itemProp == null) return weaponNames;
+
+                for (int i = 0; i < Math.Min(count, 10); i++) // Limit to 10 for display
+                {
+                    var w = itemProp.GetValue(weapons, new object[] { i });
+                    if (w == null) continue;
+
+                    // Decode the boxed enum value using pointer offset 16
+                    var il2cppObj = w as Il2CppSystem.Object;
+                    if (il2cppObj != null)
+                    {
+                        try
+                        {
+                            unsafe
+                            {
+                                IntPtr ptr = il2cppObj.Pointer;
+                                int* valuePtr = (int*)((byte*)ptr.ToPointer() + 16);
+                                int weaponTypeInt = *valuePtr;
+
+                                // Convert to WeaponType and get name from weapons dict if available
+                                if (System.Enum.IsDefined(typeof(WeaponType), weaponTypeInt))
+                                {
+                                    var weaponType = (WeaponType)weaponTypeInt;
+                                    string weaponName = weaponType.ToString();
+
+                                    // Try to get friendly name from weapons dict
+                                    if (weaponsDict != null)
+                                    {
+                                        try
+                                        {
+                                            var tryGetMethod = weaponsDict.GetType().GetMethod("TryGetValue");
+                                            if (tryGetMethod != null)
+                                            {
+                                                var weaponParams = new object[] { weaponType, null };
+                                                var found = (bool)tryGetMethod.Invoke(weaponsDict, weaponParams);
+                                                if (found && weaponParams[1] != null)
+                                                {
+                                                    var weaponList = weaponParams[1];
+                                                    var listCountProp = weaponList.GetType().GetProperty("Count");
+                                                    var listItemProp = weaponList.GetType().GetProperty("Item");
+                                                    if (listCountProp != null && listItemProp != null && (int)listCountProp.GetValue(weaponList) > 0)
+                                                    {
+                                                        var weaponData = listItemProp.GetValue(weaponList, new object[] { 0 }) as WeaponData;
+                                                        if (weaponData != null && !string.IsNullOrEmpty(weaponData.name))
+                                                        {
+                                                            weaponName = weaponData.name;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        catch { }
+                                    }
+
+                                    weaponNames.Add(weaponName);
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                if (count > 10)
+                {
+                    weaponNames.Add($"...and {count - 10} more");
+                }
+            }
+            catch { }
+            return weaponNames;
+        }
+
+        /// <summary>
+        /// Gets all unique weapon types affected by the arcana (for loading sprites).
+        /// </summary>
+        public static System.Collections.Generic.List<WeaponType> GetArcanaAffectedWeaponTypes(object arcanaData)
+        {
+            var weaponTypes = new System.Collections.Generic.List<WeaponType>();
+            var seenTypes = new System.Collections.Generic.HashSet<int>(); // Track unique weapon types
+            try
+            {
+                if (arcanaData == null) return weaponTypes;
+
+                var weaponsProp = arcanaData.GetType().GetProperty("weapons", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (weaponsProp == null) return weaponTypes;
+
+                var weapons = weaponsProp.GetValue(arcanaData);
+                if (weapons == null) return weaponTypes;
+
+                var countProp = weapons.GetType().GetProperty("Count");
+                if (countProp == null) return weaponTypes;
+
+                int count = (int)countProp.GetValue(weapons);
+                var itemProp = weapons.GetType().GetProperty("Item");
+                if (itemProp == null) return weaponTypes;
+
+                for (int i = 0; i < count; i++)
+                {
+                    var w = itemProp.GetValue(weapons, new object[] { i });
+                    if (w == null) continue;
+
+                    // Decode the boxed enum value using pointer offset 16
+                    var il2cppObj = w as Il2CppSystem.Object;
+                    if (il2cppObj != null)
+                    {
+                        try
+                        {
+                            unsafe
+                            {
+                                IntPtr ptr = il2cppObj.Pointer;
+                                int* valuePtr = (int*)((byte*)ptr.ToPointer() + 16);
+                                int weaponTypeInt = *valuePtr;
+
+                                // Only add if we haven't seen this weapon type before
+                                if (System.Enum.IsDefined(typeof(WeaponType), weaponTypeInt) && seenTypes.Add(weaponTypeInt))
+                                {
+                                    weaponTypes.Add((WeaponType)weaponTypeInt);
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            return weaponTypes;
+        }
+
         // Helper method to check if player owns a specific weapon or item
         public static bool PlayerOwnsRequirement(LevelUpPage page, WeaponType reqType)
         {
@@ -1360,6 +2070,417 @@ namespace VSEvolutionHelper
             catch { }
             return null;
         }
+
+        /// <summary>
+        /// Displays an arcana indicator on the level-up card to show this weapon is affected by an active arcana.
+        /// Shows arcana icon and name, clickable to show description and affected weapons.
+        /// </summary>
+        public static void DisplayArcanaIndicator(LevelUpItemUI instance, string arcanaName, string arcanaDescription, UnityEngine.Sprite arcanaSprite, System.Collections.Generic.List<WeaponType> affectedWeaponTypes, object weaponsDict, object powerUpsDict)
+        {
+            try
+            {
+                // Get the evo container (parent of _EvoIcons)
+                var evoIconsProperty = instance.GetType().GetProperty("_EvoIcons",
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance);
+
+                if (evoIconsProperty == null) return;
+
+                var evoIconsArray = evoIconsProperty.GetValue(instance) as Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<UnityEngine.UI.Image>;
+                if (evoIconsArray == null || evoIconsArray.Length == 0) return;
+
+                // Get the "evo" container (parent of the icon slots)
+                var evoContainer = evoIconsArray[0].transform.parent;
+                if (evoContainer == null) return;
+
+                // Look for existing arcana indicator and remove it
+                var existingIndicator = evoContainer.Find("ArcanaIndicator");
+                if (existingIndicator != null)
+                {
+                    UnityEngine.Object.Destroy(existingIndicator.gameObject);
+                }
+
+                // Also remove any existing popup
+                var existingPopup = evoContainer.Find("ArcanaPopup");
+                if (existingPopup != null)
+                {
+                    UnityEngine.Object.Destroy(existingPopup.gameObject);
+                }
+
+                // Create arcana indicator - just the icon, right-aligned
+                var indicatorObj = new UnityEngine.GameObject("ArcanaIndicator");
+                indicatorObj.transform.SetParent(evoContainer, false);
+
+                var indicatorRect = indicatorObj.AddComponent<UnityEngine.RectTransform>();
+
+                // Position to the right of the evolution formula area
+                indicatorRect.anchorMin = new UnityEngine.Vector2(1f, 0.5f); // Right side
+                indicatorRect.anchorMax = new UnityEngine.Vector2(1f, 0.5f);
+                indicatorRect.pivot = new UnityEngine.Vector2(0f, 0.5f); // Pivot on left edge
+                indicatorRect.anchoredPosition = new UnityEngine.Vector2(5f, 0f); // Small gap from formula
+                indicatorRect.sizeDelta = new UnityEngine.Vector2(40f, 40f); // Larger icon size
+
+                // Add the arcana card image
+                var iconImage = indicatorObj.AddComponent<UnityEngine.UI.Image>();
+                if (arcanaSprite != null)
+                {
+                    iconImage.sprite = arcanaSprite;
+                    iconImage.preserveAspect = true;
+                }
+                else
+                {
+                    iconImage.color = new UnityEngine.Color(0f, 0f, 0f, 0f); // Transparent if no sprite
+                }
+
+                // Store popup data for the hover handler
+                var popupData = new ArcanaPopupData
+                {
+                    Name = arcanaName,
+                    Description = arcanaDescription,
+                    ArcanaSprite = arcanaSprite,
+                    AffectedWeaponTypes = affectedWeaponTypes,
+                    WeaponsDict = weaponsDict,
+                    PowerUpsDict = powerUpsDict,
+                    EvoContainer = evoContainer,
+                    SourceCard = instance.GetComponent<UnityEngine.RectTransform>()
+                };
+
+                // Add EventTrigger for hover events
+                var eventTrigger = indicatorObj.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+
+                // Pointer Enter - show popup
+                var enterEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+                enterEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter;
+                enterEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((eventData) => ShowArcanaPopupOnHover(popupData)));
+                eventTrigger.triggers.Add(enterEntry);
+
+                // Pointer Exit - hide popup
+                var exitEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+                exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
+                exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((eventData) => HideArcanaPopup()));
+                eventTrigger.triggers.Add(exitEntry);
+
+                MelonLogger.Msg($"Arcana indicator displayed: {arcanaName} (hover enabled)");
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Error($"Error displaying arcana indicator: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Displays an arcana indicator on the pickup window (ItemFoundPage).
+        /// Shows arcana icon to the right of the formula, with hover popup.
+        /// </summary>
+        public static void DisplayArcanaIndicatorOnPickup(UnityEngine.Transform formulaParent, string arcanaName, string arcanaDescription, UnityEngine.Sprite arcanaSprite, System.Collections.Generic.List<WeaponType> affectedWeaponTypes, object weaponsDict, object powerUpsDict)
+        {
+            try
+            {
+                if (formulaParent == null || arcanaSprite == null) return;
+
+                // Look for existing arcana indicator and remove it
+                var existingIndicator = formulaParent.Find("ArcanaIndicator_Pickup");
+                if (existingIndicator != null)
+                {
+                    UnityEngine.Object.Destroy(existingIndicator.gameObject);
+                }
+
+                // Create arcana indicator - icon only, positioned to the right of the formula
+                var indicatorObj = new UnityEngine.GameObject("ArcanaIndicator_Pickup");
+                indicatorObj.transform.SetParent(formulaParent, false);
+
+                var indicatorRect = indicatorObj.AddComponent<UnityEngine.RectTransform>();
+
+                // Position to the right of the formula
+                indicatorRect.anchorMin = new UnityEngine.Vector2(1f, 0.5f);
+                indicatorRect.anchorMax = new UnityEngine.Vector2(1f, 0.5f);
+                indicatorRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+                indicatorRect.anchoredPosition = new UnityEngine.Vector2(8f, 0f); // Gap from formula
+                indicatorRect.sizeDelta = new UnityEngine.Vector2(32f, 32f); // Icon size
+
+                // Add the arcana card image
+                var iconImage = indicatorObj.AddComponent<UnityEngine.UI.Image>();
+                iconImage.sprite = arcanaSprite;
+                iconImage.preserveAspect = true;
+
+                // Store popup data for the hover handler
+                var popupData = new ArcanaPopupData
+                {
+                    Name = arcanaName,
+                    Description = arcanaDescription,
+                    ArcanaSprite = arcanaSprite,
+                    AffectedWeaponTypes = affectedWeaponTypes,
+                    WeaponsDict = weaponsDict,
+                    PowerUpsDict = powerUpsDict,
+                    EvoContainer = formulaParent,
+                    SourceCard = null
+                };
+
+                // Add EventTrigger for hover events
+                var eventTrigger = indicatorObj.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+
+                // Pointer Enter - show popup
+                var enterEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+                enterEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter;
+                enterEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((eventData) => ShowArcanaPopupOnHover(popupData)));
+                eventTrigger.triggers.Add(enterEntry);
+
+                // Pointer Exit - hide popup
+                var exitEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+                exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
+                exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((eventData) => HideArcanaPopup()));
+                eventTrigger.triggers.Add(exitEntry);
+
+                MelonLogger.Msg($"Arcana indicator displayed on pickup: {arcanaName}");
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Error($"Error displaying arcana indicator on pickup: {ex.Message}");
+            }
+        }
+
+        // Data class for popup information
+        private class ArcanaPopupData
+        {
+            public string Name;
+            public string Description;
+            public UnityEngine.Sprite ArcanaSprite;
+            public System.Collections.Generic.List<WeaponType> AffectedWeaponTypes;
+            public object WeaponsDict;
+            public object PowerUpsDict;
+            public UnityEngine.Transform EvoContainer;
+            public UnityEngine.RectTransform SourceCard; // The card that triggered this popup
+        }
+
+        // Static reference to current popup for toggling
+        private static UnityEngine.GameObject currentPopup = null;
+
+        /// <summary>
+        /// Shows the arcana popup on hover (no toggle behavior).
+        /// </summary>
+        private static void ShowArcanaPopupOnHover(ArcanaPopupData data)
+        {
+            // If popup already exists, don't create another
+            if (currentPopup != null) return;
+            ShowArcanaPopupInternal(data);
+        }
+
+        /// <summary>
+        /// Hides the arcana popup on hover exit.
+        /// </summary>
+        private static void HideArcanaPopup()
+        {
+            if (currentPopup != null)
+            {
+                UnityEngine.Object.Destroy(currentPopup);
+                currentPopup = null;
+            }
+        }
+
+        /// <summary>
+        /// Shows/hides the arcana popup with description and affected weapons (toggle version).
+        /// </summary>
+        private static void ShowArcanaPopup(ArcanaPopupData data)
+        {
+            try
+            {
+                // Toggle: if popup exists, destroy it
+                if (currentPopup != null)
+                {
+                    UnityEngine.Object.Destroy(currentPopup);
+                    currentPopup = null;
+                    return;
+                }
+                ShowArcanaPopupInternal(data);
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Error($"Error showing arcana popup: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Internal method to create the arcana popup.
+        /// </summary>
+        private static void ShowArcanaPopupInternal(ArcanaPopupData data)
+        {
+            try
+            {
+                // Find a high-level parent for proper z-ordering (renders on top of cards)
+                UnityEngine.Transform popupParent = data.EvoContainer;
+                var searchTransform = data.EvoContainer;
+                while (searchTransform.parent != null)
+                {
+                    if (searchTransform.name.Contains("Content") ||
+                        searchTransform.name.Contains("Viewport") ||
+                        searchTransform.name.Contains("Scroll"))
+                    {
+                        popupParent = searchTransform;
+                    }
+                    searchTransform = searchTransform.parent;
+                }
+
+                // Get the world position of the evo container before reparenting
+                var evoWorldPos = data.EvoContainer.position;
+
+                // Create popup at high level
+                var popupObj = new UnityEngine.GameObject("ArcanaPopup");
+                popupObj.transform.SetParent(popupParent, false);
+                currentPopup = popupObj;
+
+                var popupRect = popupObj.AddComponent<UnityEngine.RectTransform>();
+
+                // Position at the evo container's world position, offset down
+                popupRect.position = evoWorldPos;
+                popupRect.anchorMin = new UnityEngine.Vector2(0.5f, 0.5f);
+                popupRect.anchorMax = new UnityEngine.Vector2(0.5f, 0.5f);
+                popupRect.pivot = new UnityEngine.Vector2(0.5f, 1f); // Pivot at top center
+                popupRect.anchoredPosition += new UnityEngine.Vector2(0f, -30f); // Offset down
+                popupRect.sizeDelta = new UnityEngine.Vector2(300f, 0f);
+
+                // Make sure it's rendered last (on top)
+                popupObj.transform.SetAsLastSibling();
+
+                // Add background (matching game's gray color)
+                var bgImage = popupObj.AddComponent<UnityEngine.UI.Image>();
+                bgImage.color = new UnityEngine.Color(0.35f, 0.35f, 0.4f, 0.98f); // Gray like game
+
+                // Add gold outline (matching game's orange/gold border)
+                var outline = popupObj.AddComponent<UnityEngine.UI.Outline>();
+                outline.effectColor = new UnityEngine.Color(1f, 0.7f, 0.2f, 1f); // Orange/gold
+                outline.effectDistance = new UnityEngine.Vector2(3f, 3f);
+
+                // Add vertical layout group
+                var layoutGroup = popupObj.AddComponent<UnityEngine.UI.VerticalLayoutGroup>();
+                layoutGroup.spacing = 8f;
+                layoutGroup.padding = new UnityEngine.RectOffset(15, 15, 12, 12);
+                layoutGroup.childForceExpandWidth = true;
+                layoutGroup.childForceExpandHeight = false;
+                layoutGroup.childControlWidth = true;
+                layoutGroup.childControlHeight = true; // Allow height control for proper sizing
+
+                // Add content size fitter to auto-size both dimensions
+                var sizeFitter = popupObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
+                sizeFitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+                sizeFitter.verticalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+
+                // Create title text (gold, centered, like game)
+                var titleObj = new UnityEngine.GameObject("Title");
+                titleObj.transform.SetParent(popupObj.transform, false);
+
+                var titleLayout = titleObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                titleLayout.minHeight = 22f;
+                titleLayout.preferredWidth = 280f;
+
+                var titleText = titleObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                titleText.text = data.Name;
+                titleText.fontSize = 14f;
+                titleText.fontStyle = Il2CppTMPro.FontStyles.Bold;
+                titleText.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                titleText.color = new UnityEngine.Color(1f, 0.85f, 0.3f, 1f); // Gold/yellow like game
+
+                if (cachedFont != null) titleText.font = cachedFont;
+                if (cachedFontMaterial != null) titleText.fontSharedMaterial = cachedFontMaterial;
+
+                // Create description text (white, centered)
+                var descObj = new UnityEngine.GameObject("Description");
+                descObj.transform.SetParent(popupObj.transform, false);
+
+                var descLayout = descObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                descLayout.minHeight = 30f;
+                descLayout.preferredWidth = 280f;
+
+                var descText = descObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                descText.text = data.Description ?? "No description available.";
+                descText.fontSize = 11f;
+                descText.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                descText.color = new UnityEngine.Color(1f, 1f, 1f, 1f); // White like game
+                descText.enableWordWrapping = true;
+                descText.overflowMode = Il2CppTMPro.TextOverflowModes.Overflow; // Don't clip
+
+                if (cachedFont != null) descText.font = cachedFont;
+                if (cachedFontMaterial != null) descText.fontSharedMaterial = cachedFontMaterial;
+
+                // Create affected weapons section with icons
+                if (data.AffectedWeaponTypes != null && data.AffectedWeaponTypes.Count > 0)
+                {
+                    // Create horizontal container for weapon icons
+                    var iconsContainerObj = new UnityEngine.GameObject("WeaponIcons");
+                    iconsContainerObj.transform.SetParent(popupObj.transform, false);
+
+                    var iconsLayout = iconsContainerObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                    iconsLayout.minHeight = 32f;
+
+                    var iconsHLayout = iconsContainerObj.AddComponent<UnityEngine.UI.HorizontalLayoutGroup>();
+                    iconsHLayout.spacing = 4f;
+                    iconsHLayout.childForceExpandWidth = false;
+                    iconsHLayout.childForceExpandHeight = false;
+                    iconsHLayout.childControlWidth = false;
+                    iconsHLayout.childControlHeight = false;
+
+                    // Add content size fitter for proper sizing
+                    var iconsSizeFitter = iconsContainerObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
+                    iconsSizeFitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+                    iconsSizeFitter.verticalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+
+                    // Load and display weapon icons (limit to 12 to fit)
+                    int iconCount = 0;
+                    foreach (var weaponType in data.AffectedWeaponTypes)
+                    {
+                        if (iconCount >= 12) break; // Limit icons to avoid overflow
+
+                        var sprite = LoadSpriteForRequirement(weaponType, data.WeaponsDict, data.PowerUpsDict);
+                        if (sprite != null)
+                        {
+                            var iconObj = new UnityEngine.GameObject($"Icon_{weaponType}");
+                            iconObj.transform.SetParent(iconsContainerObj.transform, false);
+
+                            var iconRect = iconObj.AddComponent<UnityEngine.RectTransform>();
+                            iconRect.sizeDelta = new UnityEngine.Vector2(28f, 28f);
+
+                            var iconImage = iconObj.AddComponent<UnityEngine.UI.Image>();
+                            iconImage.sprite = sprite;
+                            iconImage.preserveAspect = true;
+
+                            var iconLayoutElem = iconObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                            iconLayoutElem.preferredWidth = 28f;
+                            iconLayoutElem.preferredHeight = 28f;
+
+                            iconCount++;
+                        }
+                    }
+
+                    // If there are more weapons than shown, add "..." indicator
+                    if (data.AffectedWeaponTypes.Count > 12)
+                    {
+                        var moreObj = new UnityEngine.GameObject("MoreIndicator");
+                        moreObj.transform.SetParent(iconsContainerObj.transform, false);
+
+                        var moreLayout = moreObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                        moreLayout.preferredWidth = 28f;
+                        moreLayout.preferredHeight = 28f;
+
+                        var moreText = moreObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                        moreText.text = $"+{data.AffectedWeaponTypes.Count - 12}";
+                        moreText.fontSize = 10f;
+                        moreText.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                        moreText.color = new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f);
+
+                        if (cachedFont != null) moreText.font = cachedFont;
+                        if (cachedFontMaterial != null) moreText.fontSharedMaterial = cachedFontMaterial;
+                    }
+
+                    MelonLogger.Msg($"Displayed {iconCount} weapon icons for arcana");
+                }
+
+                MelonLogger.Msg($"Arcana popup shown for: {data.Name}");
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Error($"Error showing arcana popup: {ex.Message}");
+            }
+        }
     }
 
     // Patch for PowerUp/Item cards to show which weapons they evolve
@@ -1504,6 +2625,14 @@ namespace VSEvolutionHelper
                 {
                     LevelUpItemUI_SetWeaponData_Patch.DisplayEvolutionFormulas(__instance, formulas);
                 }
+
+                // Check if this powerup is affected by the player's selected arcana
+                var arcanaInfo = LevelUpItemUI_SetWeaponData_Patch.GetActiveArcanaForItem(page, type);
+                if (arcanaInfo.HasValue && arcanaInfo.Value.sprite != null)
+                {
+                    var affectedWeaponTypes = LevelUpItemUI_SetWeaponData_Patch.GetArcanaAffectedWeaponTypes(arcanaInfo.Value.arcanaData);
+                    LevelUpItemUI_SetWeaponData_Patch.DisplayArcanaIndicator(__instance, arcanaInfo.Value.name, arcanaInfo.Value.description, arcanaInfo.Value.sprite, affectedWeaponTypes, weaponsDict, powerUpsDict);
+                }
             }
             catch (System.Exception ex)
             {
@@ -1632,7 +2761,7 @@ namespace VSEvolutionHelper
                 if (formula.Ingredients.Count > 0)
                 {
                     MelonLogger.Msg($"[ItemFoundPage] Calling DisplayFormulaOnItemFoundPage");
-                    DisplayFormulaOnItemFoundPage(__instance, formula);
+                    DisplayFormulaOnItemFoundPage(__instance, formula, dataManager, weaponType, weaponsDict, powerUpsDict);
                 }
                 else
                 {
@@ -1698,7 +2827,7 @@ namespace VSEvolutionHelper
         }
 
         private static void DisplayFormulaOnItemFoundPage(Il2CppVampireSurvivors.UI.ItemFoundPage instance,
-            LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula formula)
+            LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula formula, object dataManager, WeaponType weaponType, object weaponsDict, object powerUpsDict)
         {
             try
             {
@@ -1990,6 +3119,15 @@ namespace VSEvolutionHelper
                 }
 
                 MelonLogger.Msg("[ItemFoundPage] Formula displayed");
+
+                // Add arcana indicator if this weapon is affected by the active arcana
+                var arcanaInfo = LevelUpItemUI_SetWeaponData_Patch.GetActiveArcanaForWeaponFromDataManager(dataManager, weaponType);
+                if (arcanaInfo.HasValue && arcanaInfo.Value.sprite != null)
+                {
+                    var affectedWeaponTypes = LevelUpItemUI_SetWeaponData_Patch.GetArcanaAffectedWeaponTypes(arcanaInfo.Value.arcanaData);
+                    LevelUpItemUI_SetWeaponData_Patch.DisplayArcanaIndicatorOnPickup(formulaObj.transform, arcanaInfo.Value.name, arcanaInfo.Value.description,
+                        arcanaInfo.Value.sprite, affectedWeaponTypes, weaponsDict, powerUpsDict);
+                }
             }
             catch (System.Exception ex)
             {
@@ -2719,6 +3857,1107 @@ namespace VSEvolutionHelper
             {
                 MelonLogger.Error($"Error displaying formulas on ItemFoundPage: {ex}");
             }
+        }
+    }
+
+    // Patch for ShopItemUI (merchant window) - weapon items
+    [HarmonyPatch]
+    public class ShopItemUI_SetWeaponData_Patch
+    {
+        // Popup state for merchant
+        public static GameObject merchantPopup = null;
+
+        static System.Reflection.MethodBase TargetMethod()
+        {
+            var assembly = typeof(WeaponData).Assembly;
+            var shopItemType = assembly.GetType("Il2CppVampireSurvivors.ShopItemUI");
+            if (shopItemType == null)
+            {
+                MelonLogger.Warning("ShopItemUI type not found");
+                return null;
+            }
+            var method = shopItemType.GetMethod("SetWeaponData", BindingFlags.Public | BindingFlags.Instance);
+            return method;
+        }
+
+        public static void Postfix(object __instance, WeaponData d, WeaponType t)
+        {
+            try
+            {
+                if (d == null) return;
+
+                // Check if weapon can evolve
+                if (string.IsNullOrEmpty(d.evoInto) || d.evoSynergy == null || d.evoSynergy.Length == 0)
+                    return;
+
+                MelonLogger.Msg($"[Merchant] Adding evo icon for weapon: {d.name}");
+
+                // Get the ShopItemUI's transform
+                var instanceType = __instance.GetType();
+                var transformProp = instanceType.GetProperty("transform");
+                if (transformProp == null) return;
+
+                var transform = transformProp.GetValue(__instance) as UnityEngine.Transform;
+                if (transform == null) return;
+
+                // Get DataManager from _page property
+                var pageProp = instanceType.GetProperty("_page", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (pageProp == null) return;
+
+                var page = pageProp.GetValue(__instance);
+                if (page == null) return;
+
+                var dataProp = page.GetType().GetProperty("Data", BindingFlags.Public | BindingFlags.Instance);
+                if (dataProp == null)
+                    dataProp = page.GetType().GetProperty("_data", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (dataProp == null) return;
+
+                var dataManager = dataProp.GetValue(page);
+                if (dataManager == null) return;
+
+                var weaponsDict = dataManager.GetType().GetMethod("GetConvertedWeapons")?.Invoke(dataManager, null);
+                var powerUpsDict = dataManager.GetType().GetMethod("GetConvertedPowerUpData")?.Invoke(dataManager, null);
+                if (weaponsDict == null || powerUpsDict == null) return;
+
+                // Build evolution formulas (may have multiple)
+                var formulas = BuildEvolutionFormulas(d, t, weaponsDict, powerUpsDict);
+                if (formulas == null || formulas.Count == 0) return;
+
+                // Add evolution icon to the shop item
+                AddEvoIconToShopItem(transform, formulas, weaponsDict, powerUpsDict);
+
+                // Check for arcana - try weapon first, then item (PowerUp)
+                // Check for arcana - try weapon first, then item/PowerUp
+                var arcanaInfo = LevelUpItemUI_SetWeaponData_Patch.GetActiveArcanaForWeaponFromDataManager(dataManager, t);
+
+                // If not found as weapon, try as item/PowerUp using the same integer value
+                if (!arcanaInfo.HasValue || arcanaInfo.Value.sprite == null)
+                {
+                    var itemType = (ItemType)(int)t;
+                    arcanaInfo = LevelUpItemUI_SetWeaponData_Patch.GetActiveArcanaForItemFromDataManager(dataManager, itemType);
+                }
+
+                if (arcanaInfo.HasValue && arcanaInfo.Value.sprite != null)
+                {
+                    var affectedTypes = LevelUpItemUI_SetWeaponData_Patch.GetArcanaAffectedWeaponTypes(arcanaInfo.Value.arcanaData);
+                    AddArcanaIconToShopItem(transform, arcanaInfo.Value.name, arcanaInfo.Value.description, arcanaInfo.Value.sprite, affectedTypes, weaponsDict, powerUpsDict);
+                }
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Error($"Error in ShopItemUI.SetWeaponData patch: {ex}");
+            }
+        }
+
+        private static System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> BuildEvolutionFormulas(WeaponData weaponData, WeaponType weaponType, object weaponsDict, object powerUpsDict)
+        {
+            MelonLogger.Msg($"[Merchant] BuildEvolutionFormulas for {weaponData.name}: evoInto='{weaponData.evoInto}', evoSynergy={weaponData.evoSynergy?.Length ?? 0}");
+
+            // Always find all weapons that use this item as an ingredient
+            // This covers both PowerUps (used by many weapons) and weapons with their own evolutions
+            var formulas = FindWeaponsUsingItem(weaponType, weaponsDict, powerUpsDict);
+
+            return formulas;
+        }
+
+        private static System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> FindWeaponsUsingItem(WeaponType itemType, object weaponsDict, object powerUpsDict)
+        {
+            var formulas = new System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula>();
+            var itemTypeStr = itemType.ToString();
+
+            try
+            {
+                var dictType = weaponsDict.GetType();
+                var keysProperty = dictType.GetProperty("Keys");
+                var tryGetMethod = dictType.GetMethod("TryGetValue");
+
+                if (keysProperty == null || tryGetMethod == null) return formulas;
+
+                var keysCollection = keysProperty.GetValue(weaponsDict);
+                if (keysCollection == null) return formulas;
+
+                var getEnumeratorMethod = keysCollection.GetType().GetMethod("GetEnumerator");
+                if (getEnumeratorMethod == null) return formulas;
+
+                var enumerator = getEnumeratorMethod.Invoke(keysCollection, null);
+                var enumeratorType = enumerator.GetType();
+                var moveNextMethod = enumeratorType.GetMethod("MoveNext");
+                var currentProperty = enumeratorType.GetProperty("Current");
+
+                // Load the item sprite once (this is the PowerUp being purchased)
+                var itemSprite = LevelUpItemUI_SetWeaponData_Patch.LoadSpriteForRequirement(itemType, weaponsDict, powerUpsDict);
+
+                while ((bool)moveNextMethod.Invoke(enumerator, null))
+                {
+                    var weaponTypeKey = currentProperty.GetValue(enumerator);
+                    if (weaponTypeKey == null) continue;
+
+                    var weaponParams = new object[] { weaponTypeKey, null };
+                    var found = (bool)tryGetMethod.Invoke(weaponsDict, weaponParams);
+                    var weaponList = weaponParams[1];
+
+                    if (!found || weaponList == null) continue;
+
+                    var countProp = weaponList.GetType().GetProperty("Count");
+                    var itemProp = weaponList.GetType().GetProperty("Item");
+                    if (countProp == null || itemProp == null) continue;
+
+                    int itemCount = (int)countProp.GetValue(weaponList);
+                    if (itemCount == 0) continue;
+
+                    var otherWeaponData = itemProp.GetValue(weaponList, new object[] { 0 }) as WeaponData;
+                    if (otherWeaponData == null || otherWeaponData.evoSynergy == null || string.IsNullOrEmpty(otherWeaponData.evoInto))
+                        continue;
+
+                    // Check if this weapon uses our item in its evolution
+                    foreach (var reqType in otherWeaponData.evoSynergy)
+                    {
+                        if (reqType.ToString() == itemTypeStr)
+                        {
+                            var formula = new LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula();
+                            formula.ResultName = otherWeaponData.evoInto;
+
+                            // Load the weapon sprite (the weapon that evolves)
+                            var wType = (WeaponType)weaponTypeKey;
+                            var weaponSprite = LevelUpItemUI_SetWeaponData_Patch.LoadSpriteForRequirement(wType, weaponsDict, powerUpsDict);
+                            if (weaponSprite != null)
+                                formula.Ingredients.Add((weaponSprite, false));
+
+                            // Add the item being purchased
+                            if (itemSprite != null)
+                                formula.Ingredients.Add((itemSprite, false));
+
+                            // Load result sprite
+                            formula.ResultSprite = LevelUpItemUI_SetWeaponData_Patch.LoadEvoResultSprite(otherWeaponData.evoInto, weaponsDict);
+
+                            if (formula.Ingredients.Count > 0)
+                                formulas.Add(formula);
+
+                            break; // Found match for this weapon, move to next
+                        }
+                    }
+
+                    if (formulas.Count >= 6) break; // Limit to 6 formulas
+                }
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Warning($"[Merchant] Error finding weapons using item: {ex.Message}");
+            }
+
+            MelonLogger.Msg($"[Merchant] Found {formulas.Count} evolution formulas for item");
+            return formulas;
+        }
+
+        // Data holder for merchant popup (to avoid closure issues with Il2Cpp)
+        public class MerchantEvoPopupData
+        {
+            public UnityEngine.Transform IconTransform;
+            public System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> Formulas;
+            public object WeaponsDict;
+            public object PowerUpsDict;
+        }
+
+        private static System.Collections.Generic.Dictionary<int, MerchantEvoPopupData> merchantPopupDataMap = new System.Collections.Generic.Dictionary<int, MerchantEvoPopupData>();
+
+        public static void AddEvoIconToShopItem(UnityEngine.Transform shopItemTransform, System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> formulas, object weaponsDict, object powerUpsDict)
+        {
+            // Clean up existing
+            var existing = shopItemTransform.Find("EvoIndicator_Merchant");
+            if (existing != null)
+                UnityEngine.Object.Destroy(existing.gameObject);
+
+            // Get font from existing UI
+            Il2CppTMPro.TMP_FontAsset font = null;
+            UnityEngine.Material fontMaterial = null;
+            var existingTMPs = shopItemTransform.GetComponentsInChildren<Il2CppTMPro.TextMeshProUGUI>(true);
+            if (existingTMPs.Length > 0)
+            {
+                font = existingTMPs[0].font;
+                fontMaterial = existingTMPs[0].fontSharedMaterial;
+            }
+
+            // Create container for "evo:" label + icon - position under coin cost
+            var containerObj = new UnityEngine.GameObject("EvoIndicator_Merchant");
+            containerObj.transform.SetParent(shopItemTransform, false);
+
+            var containerRect = containerObj.AddComponent<UnityEngine.RectTransform>();
+            containerRect.anchorMin = new UnityEngine.Vector2(0.5f, 1f); // Anchor to top-center
+            containerRect.anchorMax = new UnityEngine.Vector2(0.5f, 1f);
+            containerRect.pivot = new UnityEngine.Vector2(0f, 1f); // Pivot at left edge so content flows right
+            containerRect.anchoredPosition = new UnityEngine.Vector2(0f, -35f); // Center, under coin area
+            containerRect.sizeDelta = new UnityEngine.Vector2(300f, 24f); // Wide enough for evo + arcana + multiple icons
+
+            float xPos = 0f;
+
+            // Add "evo:" text label - same style as card text
+            if (font != null)
+            {
+                var labelObj = new UnityEngine.GameObject("EvoLabel");
+                labelObj.transform.SetParent(containerObj.transform, false);
+
+                var labelRect = labelObj.AddComponent<UnityEngine.RectTransform>();
+                labelRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+                labelRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
+                labelRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+                labelRect.anchoredPosition = new UnityEngine.Vector2(xPos, 0f);
+                labelRect.sizeDelta = new UnityEngine.Vector2(50f, 24f);
+
+                var labelTMP = labelObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                labelTMP.font = font;
+                if (fontMaterial != null) labelTMP.fontSharedMaterial = fontMaterial;
+                labelTMP.text = "evo:";
+                labelTMP.fontSize = 18f;
+                labelTMP.color = UnityEngine.Color.white;
+                labelTMP.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+                labelTMP.overflowMode = Il2CppTMPro.TextOverflowModes.Overflow;
+                labelTMP.enableWordWrapping = false;
+
+                xPos += 60f; // Width of "evo:" text plus space gap
+            }
+
+            // Create the clickable icon - shows formula count
+            var iconObj = new UnityEngine.GameObject("EvoIcon_Merchant");
+            iconObj.transform.SetParent(containerObj.transform, false);
+
+            var iconRect = iconObj.AddComponent<UnityEngine.RectTransform>();
+            iconRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.anchoredPosition = new UnityEngine.Vector2(xPos, 0f); // Vertically centered
+            iconRect.sizeDelta = new UnityEngine.Vector2(24f, 24f); // Match text height
+
+            // Add background
+            var bgImage = iconObj.AddComponent<UnityEngine.UI.Image>();
+            bgImage.color = new UnityEngine.Color(0.2f, 0.5f, 0.9f, 0.9f); // Blue tint
+            bgImage.raycastTarget = true; // IMPORTANT: Enable raycasting for hover
+
+            // Add icon text (formula count)
+            if (font != null)
+            {
+                var textObj = new UnityEngine.GameObject("Text");
+                textObj.transform.SetParent(iconObj.transform, false);
+                var textRect = textObj.AddComponent<UnityEngine.RectTransform>();
+                textRect.anchorMin = UnityEngine.Vector2.zero;
+                textRect.anchorMax = UnityEngine.Vector2.one;
+                textRect.offsetMin = UnityEngine.Vector2.zero;
+                textRect.offsetMax = UnityEngine.Vector2.zero;
+
+                var tmp = textObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                tmp.font = font;
+                tmp.text = formulas.Count.ToString();
+                tmp.fontSize = 18f;
+                tmp.color = UnityEngine.Color.white;
+                tmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                tmp.raycastTarget = false;
+            }
+
+            // Store popup data to avoid closure issues
+            var popupData = new MerchantEvoPopupData
+            {
+                IconTransform = iconObj.transform,
+                Formulas = formulas,
+                WeaponsDict = weaponsDict,
+                PowerUpsDict = powerUpsDict
+            };
+            int iconId = iconObj.GetInstanceID();
+            merchantPopupDataMap[iconId] = popupData;
+
+            // Add hover trigger
+            var eventTrigger = iconObj.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+
+            // Pointer Enter
+            var enterEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            enterEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter;
+            enterEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((eventData) =>
+            {
+                MelonLogger.Msg("[Merchant] Hover ENTER on evo icon");
+                if (merchantPopupDataMap.TryGetValue(iconId, out var data))
+                {
+                    ShowMerchantEvoPopup(data.IconTransform, data.Formulas, data.WeaponsDict, data.PowerUpsDict);
+                }
+            }));
+            eventTrigger.triggers.Add(enterEntry);
+
+            // Pointer Exit
+            var exitEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
+            exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((eventData) =>
+            {
+                MelonLogger.Msg("[Merchant] Hover EXIT from evo icon");
+                HideMerchantPopup();
+            }));
+            eventTrigger.triggers.Add(exitEntry);
+
+            MelonLogger.Msg($"[Merchant] Added evo icon with ID {iconId}, raycastTarget={bgImage.raycastTarget}");
+        }
+
+        public static void AddArcanaIconToShopItem(UnityEngine.Transform shopItemTransform, string arcanaName, string arcanaDescription, UnityEngine.Sprite arcanaSprite, System.Collections.Generic.List<WeaponType> affectedTypes, object weaponsDict, object powerUpsDict)
+        {
+            // Clean up existing
+            var existing = shopItemTransform.Find("ArcanaIcon_Merchant");
+            if (existing != null)
+                UnityEngine.Object.Destroy(existing.gameObject);
+
+            // Find EvoIndicator_Merchant to add arcana after it
+            UnityEngine.Transform parent = shopItemTransform.Find("EvoIndicator_Merchant");
+            float xOffset = 68f; // Position after "evo:" + icon (about 42 + 20 + some spacing)
+
+            if (parent == null)
+            {
+                // No evo indicator - shouldn't happen but handle it
+                return;
+            }
+
+            // Get font from existing UI
+            Il2CppTMPro.TMP_FontAsset font = null;
+            UnityEngine.Material fontMaterial = null;
+            var existingTMPs = shopItemTransform.GetComponentsInChildren<Il2CppTMPro.TextMeshProUGUI>(true);
+            if (existingTMPs.Length > 0)
+            {
+                font = existingTMPs[0].font;
+                fontMaterial = existingTMPs[0].fontSharedMaterial;
+            }
+
+            // Add "arcana:" text label
+            if (font != null)
+            {
+                var labelObj = new UnityEngine.GameObject("ArcanaLabel");
+                labelObj.transform.SetParent(parent, false);
+
+                var labelRect = labelObj.AddComponent<UnityEngine.RectTransform>();
+                labelRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+                labelRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
+                labelRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+                labelRect.anchoredPosition = new UnityEngine.Vector2(xOffset, 0f);
+                labelRect.sizeDelta = new UnityEngine.Vector2(55f, 24f);
+
+                var labelTMP = labelObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                labelTMP.font = font;
+                if (fontMaterial != null) labelTMP.fontSharedMaterial = fontMaterial;
+                labelTMP.text = "arcana:";
+                labelTMP.fontSize = 18f;
+                labelTMP.color = UnityEngine.Color.white;
+                labelTMP.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+                labelTMP.overflowMode = Il2CppTMPro.TextOverflowModes.Overflow;
+                labelTMP.enableWordWrapping = false;
+
+                xOffset += 58f;
+            }
+
+            // Create arcana icon
+            var iconObj = new UnityEngine.GameObject("ArcanaIcon_Merchant");
+            iconObj.transform.SetParent(parent, false);
+
+            var iconRect = iconObj.AddComponent<UnityEngine.RectTransform>();
+            iconRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.anchoredPosition = new UnityEngine.Vector2(xOffset, -1f);
+            iconRect.sizeDelta = new UnityEngine.Vector2(20f, 20f);
+
+            var iconImage = iconObj.AddComponent<UnityEngine.UI.Image>();
+            iconImage.sprite = arcanaSprite;
+            iconImage.preserveAspect = true;
+            iconImage.raycastTarget = true;
+
+            // Add hover trigger for arcana popup
+            var eventTrigger = iconObj.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+
+            var enterEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            enterEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter;
+            enterEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                ShowMerchantArcanaPopup(iconObj.transform, arcanaName, arcanaDescription, affectedTypes, weaponsDict, powerUpsDict);
+            }));
+            eventTrigger.triggers.Add(enterEntry);
+
+            var exitEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
+            exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                HideMerchantPopup();
+            }));
+            eventTrigger.triggers.Add(exitEntry);
+
+            MelonLogger.Msg($"[Merchant] Added arcana icon for {arcanaName}");
+        }
+
+        public static void ShowMerchantEvoPopup(UnityEngine.Transform anchor, System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> formulas, object weaponsDict, object powerUpsDict)
+        {
+            try
+            {
+                HideMerchantPopup();
+
+                if (formulas == null || formulas.Count == 0) return;
+
+                MelonLogger.Msg($"[Merchant] ShowMerchantEvoPopup called, anchor={anchor.name}, formulas={formulas.Count}");
+
+                // Find "View - Merchant" to parent popup outside the scroll viewport mask
+                UnityEngine.Transform popupParent = anchor;
+                while (popupParent != null && popupParent.name != "View - Merchant")
+                {
+                    popupParent = popupParent.parent;
+                }
+                if (popupParent == null) popupParent = anchor.root;
+                MelonLogger.Msg($"[Merchant] Using parent: {popupParent.name}");
+
+                // Get font first
+                Il2CppTMPro.TMP_FontAsset font = null;
+                var existingTMPs = anchor.root.GetComponentsInChildren<Il2CppTMPro.TextMeshProUGUI>(true);
+                if (existingTMPs.Length > 0) font = existingTMPs[0].font;
+
+                // Calculate sizes
+                float iconSize = 24f;
+                float spacing = 3f;
+                float textWidth = 12f;
+                float padding = 8f;
+                int maxFormulas = System.Math.Min(formulas.Count, 4);
+
+                // Calculate popup dimensions
+                // Each row: icon + ('+' + icon) * (ingredients-1) + arrow + result
+                float maxRowWidth = 0f;
+                foreach (var formula in formulas.Take(maxFormulas))
+                {
+                    float rowWidth = formula.Ingredients.Count * iconSize + (formula.Ingredients.Count - 1) * textWidth + textWidth + iconSize;
+                    rowWidth += (formula.Ingredients.Count + 1) * spacing;
+                    if (rowWidth > maxRowWidth) maxRowWidth = rowWidth;
+                }
+
+                float popupWidth = maxRowWidth + padding * 2;
+                float popupHeight = maxFormulas * (iconSize + spacing) + padding * 2;
+
+                var popupObj = new UnityEngine.GameObject("MerchantEvoPopup");
+                popupObj.transform.SetParent(popupParent, false);
+                merchantPopup = popupObj;
+
+                var popupRect = popupObj.AddComponent<UnityEngine.RectTransform>();
+
+                // Get anchor's world position and convert to popup parent's local space
+                var anchorWorldPos = anchor.position;
+                var localPos = popupParent.InverseTransformPoint(anchorWorldPos);
+
+                popupRect.anchorMin = new UnityEngine.Vector2(0.5f, 0.5f);
+                popupRect.anchorMax = new UnityEngine.Vector2(0.5f, 0.5f);
+                popupRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+                popupRect.anchoredPosition = new UnityEngine.Vector2(localPos.x + 60f, localPos.y);
+                popupRect.sizeDelta = new UnityEngine.Vector2(popupWidth, popupHeight);
+                MelonLogger.Msg($"[Merchant] Popup size: {popupWidth}x{popupHeight}");
+
+                // Background
+                var bgImage = popupObj.AddComponent<UnityEngine.UI.Image>();
+                bgImage.color = new UnityEngine.Color(0.1f, 0.1f, 0.15f, 0.95f);
+
+                // Add outline
+                var outline = popupObj.AddComponent<UnityEngine.UI.Outline>();
+                outline.effectColor = new UnityEngine.Color(0.3f, 0.5f, 1f, 1f);
+                outline.effectDistance = new UnityEngine.Vector2(1f, 1f);
+
+                // Create formula rows using direct positioning
+                for (int f = 0; f < maxFormulas; f++)
+                {
+                    var formula = formulas[f];
+                    float yPos = popupHeight / 2 - padding - iconSize / 2 - f * (iconSize + spacing);
+                    float xPos = -popupWidth / 2 + padding;
+
+                    // Add ingredient icons
+                    for (int i = 0; i < formula.Ingredients.Count; i++)
+                    {
+                        if (i > 0 && font != null)
+                        {
+                            // Plus sign
+                            var plusObj = new UnityEngine.GameObject("Plus");
+                            plusObj.transform.SetParent(popupObj.transform, false);
+                            var plusRect = plusObj.AddComponent<UnityEngine.RectTransform>();
+                            plusRect.anchoredPosition = new UnityEngine.Vector2(xPos + textWidth / 2, yPos);
+                            plusRect.sizeDelta = new UnityEngine.Vector2(textWidth, iconSize);
+
+                            var plusTMP = plusObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                            plusTMP.font = font;
+                            plusTMP.text = "+";
+                            plusTMP.fontSize = 16f;
+                            plusTMP.color = UnityEngine.Color.white;
+                            plusTMP.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+
+                            xPos += textWidth + spacing;
+                        }
+
+                        var (sprite, owned) = formula.Ingredients[i];
+                        var ingObj = new UnityEngine.GameObject($"Ing_{f}_{i}");
+                        ingObj.transform.SetParent(popupObj.transform, false);
+
+                        var ingRect = ingObj.AddComponent<UnityEngine.RectTransform>();
+                        ingRect.anchoredPosition = new UnityEngine.Vector2(xPos + iconSize / 2, yPos);
+                        ingRect.sizeDelta = new UnityEngine.Vector2(iconSize, iconSize);
+
+                        var ingImage = ingObj.AddComponent<UnityEngine.UI.Image>();
+                        ingImage.sprite = sprite;
+                        ingImage.preserveAspect = true;
+
+                        // Green border if owned
+                        if (owned)
+                        {
+                            var ingOutline = ingObj.AddComponent<UnityEngine.UI.Outline>();
+                            ingOutline.effectColor = new UnityEngine.Color(0.2f, 1f, 0.2f, 1f);
+                            ingOutline.effectDistance = new UnityEngine.Vector2(2f, 2f);
+                        }
+
+                        xPos += iconSize + spacing;
+                    }
+
+                    // Arrow
+                    if (font != null)
+                    {
+                        var arrowObj = new UnityEngine.GameObject("Arrow");
+                        arrowObj.transform.SetParent(popupObj.transform, false);
+                        var arrowRect = arrowObj.AddComponent<UnityEngine.RectTransform>();
+                        arrowRect.anchoredPosition = new UnityEngine.Vector2(xPos + textWidth / 2, yPos);
+                        arrowRect.sizeDelta = new UnityEngine.Vector2(textWidth, iconSize);
+
+                        var arrowTMP = arrowObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                        arrowTMP.font = font;
+                        arrowTMP.text = "→";
+                        arrowTMP.fontSize = 16f;
+                        arrowTMP.color = UnityEngine.Color.white;
+                        arrowTMP.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+
+                        xPos += textWidth + spacing;
+                    }
+
+                    // Result
+                    if (formula.ResultSprite != null)
+                    {
+                        var resultObj = new UnityEngine.GameObject("Result");
+                        resultObj.transform.SetParent(popupObj.transform, false);
+
+                        var resultRect = resultObj.AddComponent<UnityEngine.RectTransform>();
+                        resultRect.anchoredPosition = new UnityEngine.Vector2(xPos + iconSize / 2, yPos);
+                        resultRect.sizeDelta = new UnityEngine.Vector2(iconSize, iconSize);
+
+                        var resultImage = resultObj.AddComponent<UnityEngine.UI.Image>();
+                        resultImage.sprite = formula.ResultSprite;
+                        resultImage.preserveAspect = true;
+
+                        // Gold border for result
+                        var resultOutline = resultObj.AddComponent<UnityEngine.UI.Outline>();
+                        resultOutline.effectColor = new UnityEngine.Color(1f, 0.8f, 0.2f, 1f);
+                        resultOutline.effectDistance = new UnityEngine.Vector2(1f, 1f);
+                    }
+                }
+
+                // Show "+N more" if there are additional formulas
+                if (formulas.Count > maxFormulas && font != null)
+                {
+                    var moreObj = new UnityEngine.GameObject("MoreText");
+                    moreObj.transform.SetParent(popupObj.transform, false);
+
+                    var moreRect = moreObj.AddComponent<UnityEngine.RectTransform>();
+                    moreRect.anchoredPosition = new UnityEngine.Vector2(popupWidth / 2 - 20f, -popupHeight / 2 + 8f);
+                    moreRect.sizeDelta = new UnityEngine.Vector2(40f, 12f);
+
+                    var moreTMP = moreObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                    moreTMP.font = font;
+                    moreTMP.text = $"+{formulas.Count - maxFormulas}";
+                    moreTMP.fontSize = 9f;
+                    moreTMP.color = new UnityEngine.Color(0.6f, 0.6f, 0.6f, 1f);
+                    moreTMP.alignment = Il2CppTMPro.TextAlignmentOptions.Right;
+                }
+
+                // Ensure popup is on top
+                popupObj.transform.SetAsLastSibling();
+                MelonLogger.Msg($"[Merchant] Popup created successfully");
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Error($"[Merchant] Error creating popup: {ex}");
+            }
+        }
+
+        public static void ShowMerchantArcanaPopup(UnityEngine.Transform anchor, string arcanaName, string arcanaDescription, System.Collections.Generic.List<WeaponType> affectedTypes, object weaponsDict, object powerUpsDict)
+        {
+            HideMerchantPopup();
+
+            var parent = anchor;
+            while (parent.parent != null && parent.parent.name != "Canvas - Game UI")
+                parent = parent.parent;
+
+            var popupObj = new UnityEngine.GameObject("MerchantArcanaPopup");
+            popupObj.transform.SetParent(parent, false);
+            merchantPopup = popupObj;
+
+            var popupRect = popupObj.AddComponent<UnityEngine.RectTransform>();
+            var anchorWorldPos = anchor.position;
+            popupRect.position = anchorWorldPos + new UnityEngine.Vector3(100f, 0f, 0f);
+
+            var bgImage = popupObj.AddComponent<UnityEngine.UI.Image>();
+            bgImage.color = new UnityEngine.Color(0.15f, 0.1f, 0.2f, 0.95f);
+
+            var outline = popupObj.AddComponent<UnityEngine.UI.Outline>();
+            outline.effectColor = new UnityEngine.Color(1f, 0.8f, 0.2f, 1f);
+            outline.effectDistance = new UnityEngine.Vector2(2f, 2f);
+
+            var layout = popupObj.AddComponent<UnityEngine.UI.VerticalLayoutGroup>();
+            layout.padding = new UnityEngine.RectOffset(10, 10, 10, 10);
+            layout.spacing = 5f;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+
+            var fitter = popupObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
+            fitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+            fitter.verticalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+
+            Il2CppTMPro.TMP_FontAsset font = null;
+            var existingTMPs = anchor.root.GetComponentsInChildren<Il2CppTMPro.TextMeshProUGUI>(true);
+            if (existingTMPs.Length > 0) font = existingTMPs[0].font;
+
+            if (font != null)
+            {
+                // Title
+                var titleObj = new UnityEngine.GameObject("Title");
+                titleObj.transform.SetParent(popupObj.transform, false);
+                var titleTMP = titleObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                titleTMP.font = font;
+                titleTMP.text = $"✦ {arcanaName}";
+                titleTMP.fontSize = 14f;
+                titleTMP.color = new UnityEngine.Color(1f, 0.85f, 0.4f, 1f);
+
+                // Description (truncated)
+                var descObj = new UnityEngine.GameObject("Desc");
+                descObj.transform.SetParent(popupObj.transform, false);
+                var descTMP = descObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                descTMP.font = font;
+                var shortDesc = arcanaDescription.Length > 100 ? arcanaDescription.Substring(0, 100) + "..." : arcanaDescription;
+                descTMP.text = shortDesc;
+                descTMP.fontSize = 10f;
+                descTMP.color = UnityEngine.Color.white;
+
+                var descLayout = descObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                descLayout.preferredWidth = 200f;
+            }
+
+            // Affected weapons row
+            if (affectedTypes != null && affectedTypes.Count > 0)
+            {
+                var rowObj = new UnityEngine.GameObject("WeaponsRow");
+                rowObj.transform.SetParent(popupObj.transform, false);
+
+                var rowLayout = rowObj.AddComponent<UnityEngine.UI.HorizontalLayoutGroup>();
+                rowLayout.spacing = 3f;
+                rowLayout.childControlWidth = false;
+                rowLayout.childControlHeight = false;
+
+                int maxIcons = System.Math.Min(affectedTypes.Count, 8);
+                for (int i = 0; i < maxIcons; i++)
+                {
+                    var sprite = LevelUpItemUI_SetWeaponData_Patch.LoadSpriteForRequirement(affectedTypes[i], weaponsDict, powerUpsDict);
+                    if (sprite != null)
+                    {
+                        var iconObj = new UnityEngine.GameObject($"Icon_{i}");
+                        iconObj.transform.SetParent(rowObj.transform, false);
+                        var iconImage = iconObj.AddComponent<UnityEngine.UI.Image>();
+                        iconImage.sprite = sprite;
+                        iconImage.preserveAspect = true;
+
+                        var iconLayout = iconObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                        iconLayout.preferredWidth = 20f;
+                        iconLayout.preferredHeight = 20f;
+                    }
+                }
+            }
+
+            popupObj.transform.SetAsLastSibling();
+        }
+
+        public static void HideMerchantPopup()
+        {
+            if (merchantPopup != null)
+            {
+                UnityEngine.Object.Destroy(merchantPopup);
+                merchantPopup = null;
+            }
+        }
+    }
+
+    // Patch for ShopItemUI (merchant window) - powerup items
+    [HarmonyPatch]
+    public class ShopItemUI_SetItemData_Patch
+    {
+        static System.Reflection.MethodBase TargetMethod()
+        {
+            var assembly = typeof(WeaponData).Assembly;
+            var shopItemType = assembly.GetType("Il2CppVampireSurvivors.ShopItemUI");
+            if (shopItemType == null) return null;
+            return shopItemType.GetMethod("SetItemData", BindingFlags.Public | BindingFlags.Instance);
+        }
+
+        public static void Postfix(object __instance, object d, object t)
+        {
+            try
+            {
+                if (d == null) return;
+
+                // Get ItemType value
+                int itemTypeInt = 0;
+                var il2cppObj = t as Il2CppSystem.Object;
+                if (il2cppObj != null)
+                {
+                    unsafe
+                    {
+                        IntPtr ptr = il2cppObj.Pointer;
+                        int* valuePtr = (int*)((byte*)ptr.ToPointer() + 16);
+                        itemTypeInt = *valuePtr;
+                    }
+                }
+
+                var itemType = (ItemType)itemTypeInt;
+                MelonLogger.Msg($"[Merchant] Processing powerup: {itemType}");
+
+                // Get transform
+                var instanceType = __instance.GetType();
+                var transformProp = instanceType.GetProperty("transform");
+                if (transformProp == null) return;
+
+                var transform = transformProp.GetValue(__instance) as UnityEngine.Transform;
+                if (transform == null) return;
+
+                // Get DataManager
+                var pageProp = instanceType.GetProperty("_page", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (pageProp == null) return;
+
+                var page = pageProp.GetValue(__instance);
+                if (page == null) return;
+
+                var dataProp = page.GetType().GetProperty("Data", BindingFlags.Public | BindingFlags.Instance);
+                if (dataProp == null)
+                    dataProp = page.GetType().GetProperty("_data", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (dataProp == null) return;
+
+                var dataManager = dataProp.GetValue(page);
+                if (dataManager == null) return;
+
+                var weaponsDict = dataManager.GetType().GetMethod("GetConvertedWeapons")?.Invoke(dataManager, null);
+                var powerUpsDict = dataManager.GetType().GetMethod("GetConvertedPowerUpData")?.Invoke(dataManager, null);
+                if (weaponsDict == null || powerUpsDict == null) return;
+
+                // Find all weapons that use this powerup for evolution
+                var formulas = FindWeaponsUsingPowerUp(itemType, weaponsDict, powerUpsDict);
+                if (formulas.Count == 0) return;
+
+                MelonLogger.Msg($"[Merchant] Found {formulas.Count} evolutions for powerup {itemType}");
+
+                // Add evolution icon
+                AddEvoIconForPowerUp(transform, formulas, weaponsDict, powerUpsDict);
+
+                // Check for arcana
+                var arcanaInfo = LevelUpItemUI_SetWeaponData_Patch.GetActiveArcanaForItemFromDataManager(dataManager, itemType);
+                if (arcanaInfo.HasValue && arcanaInfo.Value.sprite != null)
+                {
+                    var affectedTypes = LevelUpItemUI_SetWeaponData_Patch.GetArcanaAffectedWeaponTypes(arcanaInfo.Value.arcanaData);
+                    ShopItemUI_SetWeaponData_Patch.AddArcanaIconToShopItem(transform, arcanaInfo.Value.name, arcanaInfo.Value.description, arcanaInfo.Value.sprite, affectedTypes, weaponsDict, powerUpsDict);
+                }
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Error($"Error in ShopItemUI.SetItemData patch: {ex}");
+            }
+        }
+
+        private static System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> FindWeaponsUsingPowerUp(ItemType powerUpType, object weaponsDict, object powerUpsDict)
+        {
+            var formulas = new System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula>();
+            var powerUpTypeStr = powerUpType.ToString();
+
+            try
+            {
+                var dictType = weaponsDict.GetType();
+                var keysProperty = dictType.GetProperty("Keys");
+                var tryGetMethod = dictType.GetMethod("TryGetValue");
+
+                if (keysProperty == null || tryGetMethod == null) return formulas;
+
+                var keysCollection = keysProperty.GetValue(weaponsDict);
+                if (keysCollection == null) return formulas;
+
+                var getEnumeratorMethod = keysCollection.GetType().GetMethod("GetEnumerator");
+                if (getEnumeratorMethod == null) return formulas;
+
+                var enumerator = getEnumeratorMethod.Invoke(keysCollection, null);
+                var enumeratorType = enumerator.GetType();
+                var moveNextMethod = enumeratorType.GetMethod("MoveNext");
+                var currentProperty = enumeratorType.GetProperty("Current");
+
+                while ((bool)moveNextMethod.Invoke(enumerator, null))
+                {
+                    var weaponTypeKey = currentProperty.GetValue(enumerator);
+                    if (weaponTypeKey == null) continue;
+
+                    var weaponParams = new object[] { weaponTypeKey, null };
+                    var found = (bool)tryGetMethod.Invoke(weaponsDict, weaponParams);
+                    var weaponList = weaponParams[1];
+
+                    if (!found || weaponList == null) continue;
+
+                    var countProp = weaponList.GetType().GetProperty("Count");
+                    var itemProp = weaponList.GetType().GetProperty("Item");
+                    if (countProp == null || itemProp == null) continue;
+
+                    int itemCount = (int)countProp.GetValue(weaponList);
+                    if (itemCount == 0) continue;
+
+                    var weaponData = itemProp.GetValue(weaponList, new object[] { 0 }) as WeaponData;
+                    if (weaponData == null || weaponData.evoSynergy == null || string.IsNullOrEmpty(weaponData.evoInto))
+                        continue;
+
+                    // Check if this weapon uses our powerup
+                    foreach (var reqType in weaponData.evoSynergy)
+                    {
+                        if (reqType.ToString() == powerUpTypeStr)
+                        {
+                            var formula = new LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula();
+                            formula.ResultName = weaponData.evoInto;
+
+                            // Load weapon sprite
+                            var wType = (WeaponType)weaponTypeKey;
+                            var weaponSprite = LevelUpItemUI_SetWeaponData_Patch.LoadSpriteForRequirement(wType, weaponsDict, powerUpsDict);
+                            if (weaponSprite != null)
+                                formula.Ingredients.Add((weaponSprite, false));
+
+                            // Load powerup sprite
+                            var powerUpSprite = LevelUpItemUI_SetWeaponData_Patch.LoadSpriteForRequirement((WeaponType)(int)powerUpType, weaponsDict, powerUpsDict);
+                            if (powerUpSprite != null)
+                                formula.Ingredients.Add((powerUpSprite, true));
+
+                            // Load result sprite
+                            formula.ResultSprite = LevelUpItemUI_SetWeaponData_Patch.LoadEvoResultSprite(weaponData.evoInto, weaponsDict);
+
+                            if (formula.Ingredients.Count > 0)
+                                formulas.Add(formula);
+
+                            break;
+                        }
+                    }
+
+                    if (formulas.Count >= 5) break; // Limit
+                }
+            }
+            catch (System.Exception ex)
+            {
+                MelonLogger.Warning($"Error finding weapons for powerup: {ex.Message}");
+            }
+
+            return formulas;
+        }
+
+        private static void AddEvoIconForPowerUp(UnityEngine.Transform shopItemTransform, System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> formulas, object weaponsDict, object powerUpsDict)
+        {
+            var existing = shopItemTransform.Find("EvoIcon_Merchant");
+            if (existing != null)
+                UnityEngine.Object.Destroy(existing.gameObject);
+
+            var iconObj = new UnityEngine.GameObject("EvoIcon_Merchant");
+            iconObj.transform.SetParent(shopItemTransform, false);
+
+            var iconRect = iconObj.AddComponent<UnityEngine.RectTransform>();
+            iconRect.anchorMin = new UnityEngine.Vector2(1f, 1f);
+            iconRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+            iconRect.pivot = new UnityEngine.Vector2(1f, 1f);
+            iconRect.anchoredPosition = new UnityEngine.Vector2(-5f, -5f);
+            iconRect.sizeDelta = new UnityEngine.Vector2(24f, 24f);
+
+            var bgImage = iconObj.AddComponent<UnityEngine.UI.Image>();
+            bgImage.color = new UnityEngine.Color(0.2f, 0.6f, 1f, 0.9f);
+
+            Il2CppTMPro.TMP_FontAsset font = null;
+            var existingTMPs = shopItemTransform.GetComponentsInChildren<Il2CppTMPro.TextMeshProUGUI>(true);
+            if (existingTMPs.Length > 0) font = existingTMPs[0].font;
+
+            if (font != null)
+            {
+                var textObj = new UnityEngine.GameObject("Text");
+                textObj.transform.SetParent(iconObj.transform, false);
+                var textRect = textObj.AddComponent<UnityEngine.RectTransform>();
+                textRect.anchorMin = UnityEngine.Vector2.zero;
+                textRect.anchorMax = UnityEngine.Vector2.one;
+                textRect.offsetMin = UnityEngine.Vector2.zero;
+                textRect.offsetMax = UnityEngine.Vector2.zero;
+
+                var tmp = textObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                tmp.font = font;
+                tmp.text = $"⟳{formulas.Count}";
+                tmp.fontSize = 12f;
+                tmp.color = UnityEngine.Color.white;
+                tmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+            }
+
+            var eventTrigger = iconObj.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+
+            var enterEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            enterEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter;
+            enterEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                ShowMultiEvoPopup(iconObj.transform, formulas);
+            }));
+            eventTrigger.triggers.Add(enterEntry);
+
+            var exitEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
+            exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                ShopItemUI_SetWeaponData_Patch.HideMerchantPopup();
+            }));
+            eventTrigger.triggers.Add(exitEntry);
+        }
+
+        private static void ShowMultiEvoPopup(UnityEngine.Transform anchor, System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> formulas)
+        {
+            ShopItemUI_SetWeaponData_Patch.HideMerchantPopup();
+
+            // Find "View - Merchant" to parent popup outside the scroll viewport mask
+            UnityEngine.Transform popupParent = anchor;
+            while (popupParent != null && popupParent.name != "View - Merchant")
+            {
+                popupParent = popupParent.parent;
+            }
+            if (popupParent == null) popupParent = anchor.root;
+
+            var popupObj = new UnityEngine.GameObject("MerchantMultiEvoPopup");
+            popupObj.transform.SetParent(popupParent, false);
+            ShopItemUI_SetWeaponData_Patch.merchantPopup = popupObj;
+
+            var popupRect = popupObj.AddComponent<UnityEngine.RectTransform>();
+
+            // Get anchor's world position and convert to popup parent's local space
+            var anchorWorldPos = anchor.position;
+            var localPos = popupParent.InverseTransformPoint(anchorWorldPos);
+
+            popupRect.anchorMin = new UnityEngine.Vector2(0.5f, 0.5f);
+            popupRect.anchorMax = new UnityEngine.Vector2(0.5f, 0.5f);
+            popupRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+            popupRect.anchoredPosition = new UnityEngine.Vector2(localPos.x + 50f, localPos.y);
+
+            var bgImage = popupObj.AddComponent<UnityEngine.UI.Image>();
+            bgImage.color = new UnityEngine.Color(0.1f, 0.1f, 0.15f, 0.95f);
+
+            var outline = popupObj.AddComponent<UnityEngine.UI.Outline>();
+            outline.effectColor = new UnityEngine.Color(0.3f, 0.5f, 1f, 1f);
+            outline.effectDistance = new UnityEngine.Vector2(2f, 2f);
+
+            var layout = popupObj.AddComponent<UnityEngine.UI.VerticalLayoutGroup>();
+            layout.padding = new UnityEngine.RectOffset(10, 10, 10, 10);
+            layout.spacing = 8f;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+
+            var fitter = popupObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
+            fitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+            fitter.verticalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+
+            Il2CppTMPro.TMP_FontAsset font = null;
+            var existingTMPs = anchor.root.GetComponentsInChildren<Il2CppTMPro.TextMeshProUGUI>(true);
+            if (existingTMPs.Length > 0) font = existingTMPs[0].font;
+
+            if (font != null)
+            {
+                var titleObj = new UnityEngine.GameObject("Title");
+                titleObj.transform.SetParent(popupObj.transform, false);
+                var titleTMP = titleObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                titleTMP.font = font;
+                titleTMP.text = $"Evolutions ({formulas.Count})";
+                titleTMP.fontSize = 14f;
+                titleTMP.color = new UnityEngine.Color(0.5f, 0.8f, 1f, 1f);
+                titleTMP.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+
+                var titleLayout = titleObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                titleLayout.preferredHeight = 20f;
+            }
+
+            float iconSize = 20f;
+            int maxFormulas = System.Math.Min(formulas.Count, 4);
+
+            for (int f = 0; f < maxFormulas; f++)
+            {
+                var formula = formulas[f];
+
+                var rowObj = new UnityEngine.GameObject($"Row_{f}");
+                rowObj.transform.SetParent(popupObj.transform, false);
+
+                var rowLayout = rowObj.AddComponent<UnityEngine.UI.HorizontalLayoutGroup>();
+                rowLayout.spacing = 4f;
+                rowLayout.childControlWidth = false;
+                rowLayout.childControlHeight = false;
+
+                for (int i = 0; i < formula.Ingredients.Count; i++)
+                {
+                    if (i > 0 && font != null)
+                    {
+                        var plusObj = new UnityEngine.GameObject("Plus");
+                        plusObj.transform.SetParent(rowObj.transform, false);
+                        var plusTMP = plusObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                        plusTMP.font = font;
+                        plusTMP.text = "+";
+                        plusTMP.fontSize = 16f;
+                        plusTMP.color = UnityEngine.Color.white;
+
+                        var plusLayout = plusObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                        plusLayout.preferredWidth = 12f;
+                        plusLayout.preferredHeight = iconSize;
+                    }
+
+                    var (sprite, owned) = formula.Ingredients[i];
+                    var ingObj = new UnityEngine.GameObject($"Ing_{i}");
+                    ingObj.transform.SetParent(rowObj.transform, false);
+
+                    var ingImage = ingObj.AddComponent<UnityEngine.UI.Image>();
+                    ingImage.sprite = sprite;
+                    ingImage.preserveAspect = true;
+
+                    var ingLayout = ingObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                    ingLayout.preferredWidth = iconSize;
+                    ingLayout.preferredHeight = iconSize;
+
+                    if (owned)
+                    {
+                        var ingOutline = ingObj.AddComponent<UnityEngine.UI.Outline>();
+                        ingOutline.effectColor = new UnityEngine.Color(0.2f, 1f, 0.2f, 1f);
+                        ingOutline.effectDistance = new UnityEngine.Vector2(2f, 2f);
+                    }
+                }
+
+                if (font != null)
+                {
+                    var arrowObj = new UnityEngine.GameObject("Arrow");
+                    arrowObj.transform.SetParent(rowObj.transform, false);
+                    var arrowTMP = arrowObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                    arrowTMP.font = font;
+                    arrowTMP.text = "→";
+                    arrowTMP.fontSize = 16f;
+                    arrowTMP.color = UnityEngine.Color.white;
+
+                    var arrowLayout = arrowObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                    arrowLayout.preferredWidth = 16f;
+                    arrowLayout.preferredHeight = iconSize;
+                }
+
+                if (formula.ResultSprite != null)
+                {
+                    var resultObj = new UnityEngine.GameObject("Result");
+                    resultObj.transform.SetParent(rowObj.transform, false);
+
+                    var resultImage = resultObj.AddComponent<UnityEngine.UI.Image>();
+                    resultImage.sprite = formula.ResultSprite;
+                    resultImage.preserveAspect = true;
+
+                    var resultLayout = resultObj.AddComponent<UnityEngine.UI.LayoutElement>();
+                    resultLayout.preferredWidth = iconSize;
+                    resultLayout.preferredHeight = iconSize;
+
+                    var resultOutline = resultObj.AddComponent<UnityEngine.UI.Outline>();
+                    resultOutline.effectColor = new UnityEngine.Color(1f, 0.8f, 0.2f, 1f);
+                    resultOutline.effectDistance = new UnityEngine.Vector2(2f, 2f);
+                }
+            }
+
+            popupObj.transform.SetAsLastSibling();
         }
     }
 }
