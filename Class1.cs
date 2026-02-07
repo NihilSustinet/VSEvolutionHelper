@@ -13,23 +13,31 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using Il2CppInterop.Runtime;
 
-[assembly: MelonInfo(typeof(VSEvolutionHelper.VSEvolutionHelper), "VSEvolutionHelper", "1.0.0", "Nihil")]
+// OLD MOD - temporarily disabled for new ItemTooltips mod
+// [assembly: MelonInfo(typeof(VSEvolutionHelper.VSEvolutionHelper), "VSEvolutionHelper", "1.0.0", "Nihil")]
+// [assembly: MelonGame("poncle", "Vampire Survivors")]
+
+// NEW MOD - universal item tooltips
+[assembly: MelonInfo(typeof(VSItemTooltips.ItemTooltipsMod), "VS Item Tooltips", "1.0.0", "Nihil")]
 [assembly: MelonGame("poncle", "Vampire Survivors")]
 
 namespace VSEvolutionHelper
 {
-    public class VSEvolutionHelper : MelonMod
+    // DISABLED - using ItemTooltips.cs instead
+    // This class is kept for reference only. To re-enable, uncomment the : MelonMod inheritance below.
+    public class VSEvolutionHelper // : MelonMod
     {
         private static HarmonyLib.Harmony harmonyInstance;
 
-        public override void OnInitializeMelon()
+        public void OnInitializeMelon() // removed override since not inheriting MelonMod
         {
-            LoggerInstance.Msg("VSEvolutionHelper initialized!");
-
-            harmonyInstance = new HarmonyLib.Harmony("com.nihil.vsevolutionhelper");
-            harmonyInstance.PatchAll(typeof(VSEvolutionHelper).Assembly);
+            // LoggerInstance.Msg("VSEvolutionHelper initialized!");
+            // harmonyInstance = new HarmonyLib.Harmony("com.nihil.vsevolutionhelper");
+            // harmonyInstance.PatchAll(typeof(VSEvolutionHelper).Assembly);
         }
     }
+
+#if false // DISABLED - All code below is disabled. Using ItemTooltips.cs instead.
 
     #region Shared UI Utilities
 
@@ -219,10 +227,11 @@ namespace VSEvolutionHelper
             var layout = obj.AddComponent<UnityEngine.UI.VerticalLayoutGroup>();
             layout.padding = new UnityEngine.RectOffset((int)padding, (int)padding, (int)padding, (int)padding);
             layout.spacing = spacing;
-            layout.childControlWidth = true;
-            layout.childControlHeight = true;
+            layout.childControlWidth = false;  // Let children control their own width (for ContentSizeFitter)
+            layout.childControlHeight = true;  // Control height for proper stacking
             layout.childForceExpandWidth = false;
             layout.childForceExpandHeight = false;
+            layout.childAlignment = (UnityEngine.TextAnchor)0;  // UpperLeft
 
             var fitter = obj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
             fitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
@@ -238,20 +247,22 @@ namespace VSEvolutionHelper
         {
             var layout = obj.AddComponent<UnityEngine.UI.HorizontalLayoutGroup>();
             layout.spacing = spacing;
-            layout.childControlWidth = false;
-            layout.childControlHeight = false;
-            layout.childForceExpandWidth = false;
+            layout.childControlWidth = true;   // Use LayoutElement preferred sizes
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = false;  // Don't expand to fill
             layout.childForceExpandHeight = false;
+            layout.childAlignment = (UnityEngine.TextAnchor)3;  // MiddleLeft
         }
 
         /// <summary>
         /// Destroys an existing child by name if it exists.
+        /// Uses DestroyImmediate to ensure the object is gone before next operation.
         /// </summary>
         public static void CleanupChild(UnityEngine.Transform parent, string childName)
         {
             var existing = parent.Find(childName);
             if (existing != null)
-                UnityEngine.Object.Destroy(existing.gameObject);
+                UnityEngine.Object.DestroyImmediate(existing.gameObject);
         }
 
         /// <summary>
@@ -270,11 +281,18 @@ namespace VSEvolutionHelper
         /// <summary>
         /// Adds a layout element for size control in layout groups.
         /// </summary>
-        public static void AddLayoutElement(UnityEngine.GameObject obj, float preferredWidth, float preferredHeight)
+        public static void AddLayoutElement(UnityEngine.GameObject obj, float width, float height, bool constrain = false)
         {
             var layoutElement = obj.AddComponent<UnityEngine.UI.LayoutElement>();
-            layoutElement.preferredWidth = preferredWidth;
-            layoutElement.preferredHeight = preferredHeight;
+            layoutElement.preferredWidth = width;
+            layoutElement.preferredHeight = height;
+            if (constrain)
+            {
+                layoutElement.minWidth = width;
+                layoutElement.minHeight = height;
+                layoutElement.flexibleWidth = 0;
+                layoutElement.flexibleHeight = 0;
+            }
         }
     }
 
@@ -318,14 +336,19 @@ namespace VSEvolutionHelper
     {
         // Single popup instance shared across all contexts
         private static UnityEngine.GameObject currentPopup = null;
+        private static int currentAnchorId = 0; // Track anchor by instance ID
+        private static bool isCreatingPopup = false; // Prevent re-entry during creation
+        private static bool isMouseOverIndicator = false;
+        private static bool isMouseOverPopup = false;
 
         // Popup styling constants
         private static readonly UnityEngine.Color PopupBgColor = new UnityEngine.Color(0.1f, 0.1f, 0.15f, 0.95f);
         private static readonly UnityEngine.Color PopupOutlineColor = new UnityEngine.Color(0.4f, 0.6f, 0.9f, 1f);
         private static readonly UnityEngine.Color OwnedHighlightColor = new UnityEngine.Color(0.2f, 0.8f, 0.2f, 1f);
-        private static readonly float IconSize = 24f;
-        private static readonly float Spacing = 4f;
-        private static readonly float Padding = 10f;
+        private static readonly float IconSize = 32f;  // Readable icons
+        private static readonly float Spacing = 2f;    // Tight spacing
+        private static readonly float Padding = 4f;    // Minimal padding
+        private static readonly float PlusArrowWidth = 14f; // Text element width
 
         /// <summary>
         /// Displays the evolution indicator ("evo: [N]") on a UI element.
@@ -337,6 +360,8 @@ namespace VSEvolutionHelper
             UIContext context,
             System.Action<UnityEngine.Transform> onShowPopup)
         {
+            MelonLogger.Msg($"[UNIFIED] EvolutionDisplay.ShowIndicator called - context={context}, formulas={formulas?.Count ?? 0}");
+
             string containerName = "EvoIndicator_Unified";
             UIHelper.CleanupChild(parent, containerName);
 
@@ -358,10 +383,11 @@ namespace VSEvolutionHelper
                     containerRect.anchoredPosition = new UnityEngine.Vector2(10f, 10f);
                     break;
                 case UIContext.Merchant:
+                    // Center-anchored, shifted right
                     containerRect.anchorMin = new UnityEngine.Vector2(0.5f, 1f);
                     containerRect.anchorMax = new UnityEngine.Vector2(0.5f, 1f);
-                    containerRect.pivot = new UnityEngine.Vector2(0f, 1f);
-                    containerRect.anchoredPosition = new UnityEngine.Vector2(0f, -35f);
+                    containerRect.pivot = new UnityEngine.Vector2(0f, 1f);  // Left pivot
+                    containerRect.anchoredPosition = new UnityEngine.Vector2(-15f, -35f);  // Start 15px left of center
                     break;
                 case UIContext.Pickup:
                     containerRect.anchorMin = new UnityEngine.Vector2(0f, 0f);
@@ -370,7 +396,7 @@ namespace VSEvolutionHelper
                     containerRect.anchoredPosition = new UnityEngine.Vector2(5f, 5f);
                     break;
             }
-            containerRect.sizeDelta = new UnityEngine.Vector2(300f, 28f);
+            containerRect.sizeDelta = new UnityEngine.Vector2(300f, 36f);  // Taller for 32px icons
 
             float xPos = 0f;
 
@@ -386,7 +412,7 @@ namespace VSEvolutionHelper
                 "EvoLabel");
             xPos += 60f;
 
-            // Create hover icon with formula count
+            // Create hover icon with formula count (32x32 for visibility)
             var iconObj = new UnityEngine.GameObject("EvoIcon");
             iconObj.transform.SetParent(containerObj.transform, false);
 
@@ -395,7 +421,7 @@ namespace VSEvolutionHelper
             iconRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
             iconRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
             iconRect.anchoredPosition = new UnityEngine.Vector2(xPos, 0f);
-            iconRect.sizeDelta = new UnityEngine.Vector2(24f, 24f);
+            iconRect.sizeDelta = new UnityEngine.Vector2(32f, 32f);
 
             var bgImage = iconObj.AddComponent<UnityEngine.UI.Image>();
             bgImage.color = new UnityEngine.Color(0.2f, 0.5f, 0.9f, 0.9f);
@@ -416,18 +442,43 @@ namespace VSEvolutionHelper
                 var tmp = textObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
                 tmp.font = font;
                 tmp.text = formulas.Count.ToString();
-                tmp.fontSize = 18f;
+                tmp.fontSize = 20f;  // Larger for 32px icon
                 tmp.color = UnityEngine.Color.white;
                 tmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
                 tmp.raycastTarget = false;
             }
 
-            // Add hover trigger
+            // Add hover trigger with state tracking
             UIHelper.AddHoverTrigger(iconObj,
-                () => onShowPopup?.Invoke(iconObj.transform),
-                () => HidePopup());
+                () => {
+                    isMouseOverIndicator = true;
+                    onShowPopup?.Invoke(iconObj.transform);
+                },
+                () => {
+                    isMouseOverIndicator = false;
+                    // Start delayed hide check
+                    MelonLoader.MelonCoroutines.Start(DelayedHideCheck());
+                });
 
             return containerObj;
+        }
+
+        private static System.Collections.IEnumerator DelayedHideCheck()
+        {
+            // Wait a few frames to allow mouse to move to popup
+            for (int i = 0; i < 10; i++)
+            {
+                yield return null;
+                // If mouse re-entered indicator or is over popup, cancel hide
+                if (isMouseOverIndicator || isMouseOverPopup)
+                    yield break;
+            }
+
+            // Mouse is not over indicator or popup - hide
+            if (!isMouseOverIndicator && !isMouseOverPopup)
+            {
+                HidePopup();
+            }
         }
 
         /// <summary>
@@ -438,9 +489,39 @@ namespace VSEvolutionHelper
             System.Collections.Generic.List<EvolutionFormula> formulas,
             UIContext context)
         {
-            HidePopup();
+            // Prevent flickering - don't recreate if already showing for same anchor
+            int anchorId = anchor?.GetInstanceID() ?? 0;
 
-            if (formulas == null || formulas.Count == 0) return;
+            // Unity object null check (object may be destroyed but reference not null)
+            bool popupExists = currentPopup != null && currentPopup;
+
+            MelonLogger.Msg($"[UNIFIED] ShowPopup check: anchorId={anchorId}, currentAnchorId={currentAnchorId}, popupExists={popupExists}, creating={isCreatingPopup}");
+
+            if (isCreatingPopup)
+            {
+                return;
+            }
+            if (popupExists && currentAnchorId == anchorId && anchorId != 0)
+            {
+                MelonLogger.Msg("[UNIFIED] ShowPopup skipped - same anchor");
+                return; // Same popup already showing
+            }
+
+            isCreatingPopup = true;
+            currentAnchorId = anchorId; // Set BEFORE destroying old popup
+
+            // Destroy old popup if exists (but don't reset anchorId - we just set it)
+            if (popupExists)
+            {
+                UnityEngine.Object.Destroy(currentPopup);
+            }
+            currentPopup = null;
+
+            if (formulas == null || formulas.Count == 0)
+            {
+                isCreatingPopup = false;
+                return;
+            }
 
             // Find appropriate parent for popup (to avoid clipping)
             string parentName = context == UIContext.Merchant ? "View - Merchant" : "View - Level Up";
@@ -448,23 +529,27 @@ namespace VSEvolutionHelper
 
             // Create popup
             currentPopup = UIHelper.CreatePopupBase(popupParent, "EvoPopup_Unified", PopupBgColor, PopupOutlineColor);
+
+            // Enable raycast on popup background so we can detect hover
+            var bgImage = currentPopup.GetComponent<UnityEngine.UI.Image>();
+            if (bgImage != null) bgImage.raycastTarget = true;
+
+            // Add hover tracking to popup
+            UIHelper.AddHoverTrigger(currentPopup,
+                () => { isMouseOverPopup = true; },
+                () => {
+                    isMouseOverPopup = false;
+                    MelonLoader.MelonCoroutines.Start(DelayedHideCheck());
+                });
+
             UIHelper.AddVerticalLayout(currentPopup, Padding, Spacing);
 
-            // Add title
-            var titleRow = new UnityEngine.GameObject("TitleRow");
-            titleRow.transform.SetParent(currentPopup.transform, false);
-            UIHelper.AddLayoutElement(titleRow, 200f, 20f);
+            // Add ContentSizeFitter to shrink popup to fit content
+            var popupFitter = currentPopup.AddComponent<UnityEngine.UI.ContentSizeFitter>();
+            popupFitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+            popupFitter.verticalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
 
             var (font, material) = UIHelper.GetFont(anchor);
-            if (font != null)
-            {
-                var titleTmp = titleRow.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
-                titleTmp.font = font;
-                titleTmp.text = "Evolution Paths";
-                titleTmp.fontSize = 16f;
-                titleTmp.color = new UnityEngine.Color(1f, 0.85f, 0.4f, 1f); // Gold
-                titleTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
-            }
 
             // Add each formula row (limit to 4, show "+N more" if needed)
             int maxShow = System.Math.Min(formulas.Count, 4);
@@ -477,14 +562,13 @@ namespace VSEvolutionHelper
             {
                 var moreRow = new UnityEngine.GameObject("MoreRow");
                 moreRow.transform.SetParent(currentPopup.transform, false);
-                UIHelper.AddLayoutElement(moreRow, 200f, 18f);
 
                 if (font != null)
                 {
                     var moreTmp = moreRow.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
                     moreTmp.font = font;
                     moreTmp.text = $"+{formulas.Count - 4} more...";
-                    moreTmp.fontSize = 14f;
+                    moreTmp.fontSize = 12f;
                     moreTmp.color = new UnityEngine.Color(0.7f, 0.7f, 0.7f, 1f);
                     moreTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
                 }
@@ -492,6 +576,9 @@ namespace VSEvolutionHelper
 
             // Position popup near anchor
             PositionPopup(currentPopup, anchor, context);
+
+            MelonLogger.Msg($"[UNIFIED] ShowPopup created successfully - popup active: {currentPopup != null}");
+            isCreatingPopup = false;
         }
 
         /// <summary>
@@ -505,34 +592,30 @@ namespace VSEvolutionHelper
         {
             var rowObj = new UnityEngine.GameObject("FormulaRow");
             rowObj.transform.SetParent(parent, false);
-            UIHelper.AddHorizontalLayout(rowObj, 3f);
+            UIHelper.AddHorizontalLayout(rowObj, Spacing);
 
-            // Calculate row width
-            float rowWidth = 0f;
-            foreach (var ing in formula.Ingredients)
-            {
-                rowWidth += IconSize + 3f; // icon + spacing
-                if (formula.Ingredients.IndexOf(ing) < formula.Ingredients.Count - 1)
-                    rowWidth += 15f; // "+" text width
-            }
-            rowWidth += 20f + IconSize; // arrow + result icon
-
-            UIHelper.AddLayoutElement(rowObj, rowWidth, IconSize);
+            // Use ContentSizeFitter to shrink row to fit contents
+            var fitter = rowObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
+            fitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+            fitter.verticalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
 
             // Add ingredients with "+" between them
             for (int i = 0; i < formula.Ingredients.Count; i++)
             {
                 var ing = formula.Ingredients[i];
 
-                // Create icon
+                // Create icon with explicit size
                 var iconObj = new UnityEngine.GameObject($"Ingredient_{i}");
                 iconObj.transform.SetParent(rowObj.transform, false);
+
+                var iconRect = iconObj.AddComponent<UnityEngine.RectTransform>();
+                iconRect.sizeDelta = new UnityEngine.Vector2(IconSize, IconSize);
 
                 var iconImage = iconObj.AddComponent<UnityEngine.UI.Image>();
                 iconImage.sprite = ing.sprite;
                 iconImage.preserveAspect = true;
 
-                UIHelper.AddLayoutElement(iconObj, IconSize, IconSize);
+                UIHelper.AddLayoutElement(iconObj, IconSize, IconSize, true);
 
                 // Add green highlight if owned
                 if (ing.owned)
@@ -547,14 +630,19 @@ namespace VSEvolutionHelper
                 {
                     var plusObj = new UnityEngine.GameObject("Plus");
                     plusObj.transform.SetParent(rowObj.transform, false);
-                    UIHelper.AddLayoutElement(plusObj, 15f, IconSize);
+
+                    var plusRect = plusObj.AddComponent<UnityEngine.RectTransform>();
+                    plusRect.sizeDelta = new UnityEngine.Vector2(PlusArrowWidth, IconSize);
+
+                    UIHelper.AddLayoutElement(plusObj, PlusArrowWidth, IconSize, true);  // Constrained
 
                     var plusTmp = plusObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
                     plusTmp.font = font;
                     plusTmp.text = "+";
-                    plusTmp.fontSize = 16f;
+                    plusTmp.fontSize = IconSize * 0.7f;  // Slightly smaller text
                     plusTmp.color = UnityEngine.Color.white;
                     plusTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                    plusTmp.overflowMode = Il2CppTMPro.TextOverflowModes.Overflow;
                 }
             }
 
@@ -563,25 +651,33 @@ namespace VSEvolutionHelper
             {
                 var arrowObj = new UnityEngine.GameObject("Arrow");
                 arrowObj.transform.SetParent(rowObj.transform, false);
-                UIHelper.AddLayoutElement(arrowObj, 20f, IconSize);
+
+                var arrowRect = arrowObj.AddComponent<UnityEngine.RectTransform>();
+                arrowRect.sizeDelta = new UnityEngine.Vector2(PlusArrowWidth, IconSize);
+
+                UIHelper.AddLayoutElement(arrowObj, PlusArrowWidth, IconSize, true);  // Constrained
 
                 var arrowTmp = arrowObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
                 arrowTmp.font = font;
                 arrowTmp.text = "→";
-                arrowTmp.fontSize = 16f;
+                arrowTmp.fontSize = IconSize * 0.7f;  // Slightly smaller text
                 arrowTmp.color = UnityEngine.Color.white;
                 arrowTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                arrowTmp.overflowMode = Il2CppTMPro.TextOverflowModes.Overflow;
             }
 
-            // Add result icon
+            // Add result icon with explicit size
             var resultObj = new UnityEngine.GameObject("Result");
             resultObj.transform.SetParent(rowObj.transform, false);
+
+            var resultRect = resultObj.AddComponent<UnityEngine.RectTransform>();
+            resultRect.sizeDelta = new UnityEngine.Vector2(IconSize, IconSize);
 
             var resultImage = resultObj.AddComponent<UnityEngine.UI.Image>();
             resultImage.sprite = formula.ResultSprite;
             resultImage.preserveAspect = true;
 
-            UIHelper.AddLayoutElement(resultObj, IconSize, IconSize);
+            UIHelper.AddLayoutElement(resultObj, IconSize, IconSize, true);
         }
 
         /// <summary>
@@ -619,10 +715,15 @@ namespace VSEvolutionHelper
         /// </summary>
         public static void HidePopup()
         {
-            if (currentPopup != null)
+            isCreatingPopup = false;
+            isMouseOverPopup = false;
+            // Unity object null check
+            bool popupExists = currentPopup != null && currentPopup;
+            if (popupExists)
             {
                 UnityEngine.Object.Destroy(currentPopup);
                 currentPopup = null;
+                currentAnchorId = 0; // Only reset when we actually destroyed a popup
             }
         }
     }
@@ -632,68 +733,165 @@ namespace VSEvolutionHelper
     /// </summary>
     public static class ArcanaDisplay
     {
-        // Single popup instance
+        // Single popup instance shared across all contexts
         private static UnityEngine.GameObject currentPopup = null;
+        private static int currentAnchorId = 0;
+        private static bool isCreatingPopup = false;
+        private static bool isMouseOverIndicator = false;
+        private static bool isMouseOverPopup = false;
 
-        // Styling constants
-        private static readonly UnityEngine.Color PopupBgColor = new UnityEngine.Color(0.15f, 0.1f, 0.2f, 0.95f);
+        // Styling constants - large, readable popup
+        private static readonly UnityEngine.Color PopupBgColor = new UnityEngine.Color(0.12f, 0.08f, 0.18f, 0.98f);
         private static readonly UnityEngine.Color PopupOutlineColor = new UnityEngine.Color(0.8f, 0.5f, 0.9f, 1f);
-        private static readonly float IconSize = 20f;
+        private static readonly float PopupIconSize = 56f;  // Large icons for readability
+        private static readonly float TitleIconSize = 72f;  // Even larger for title
+        private static readonly float IconSpacing = 8f;     // Space between icons
+        private static readonly float SectionSpacing = 16f; // Space between sections
+        private static readonly float Padding = 16f;        // Edge padding
+        private static readonly int IconsPerRow = 8;        // Wrap to new row after this many
+        private static readonly float PopupMinWidth = 520f; // Minimum popup width
 
         /// <summary>
-        /// Displays the arcana indicator ("arcana:" + icon) on a UI element.
+        /// Displays the arcana indicator (just icon) on a UI element.
         /// Call after EvolutionDisplay.ShowIndicator to position correctly.
         /// </summary>
         public static UnityEngine.GameObject ShowIndicator(
             UnityEngine.Transform parent,
             ArcanaInfo arcana,
             UIContext context,
-            float xOffset, // Where to start (after evo indicator)
+            float xOffset,
             System.Action<UnityEngine.Transform> onShowPopup)
         {
-            string containerName = "ArcanaIndicator_Unified";
-            UIHelper.CleanupChild(parent, containerName);
-
             if (arcana == null || arcana.Sprite == null) return null;
 
-            // For merchant, add to the evo container if it exists
+            MelonLogger.Msg($"[UNIFIED] ArcanaDisplay.ShowIndicator called - context={context}, arcana={arcana.Name}");
+
+            // Find the evo container to add arcana content to it
             var evoContainer = parent.Find("EvoIndicator_Unified");
-            var targetParent = evoContainer != null ? evoContainer : parent;
+            if (evoContainer == null)
+            {
+                MelonLogger.Warning("[UNIFIED] ArcanaDisplay - evo container not found, skipping");
+                return null;
+            }
 
-            // Create "arcana:" label
-            var labelObj = UIHelper.CreateLabel(
-                targetParent,
-                "arcana:",
-                new UnityEngine.Vector2(xOffset, 0f),
-                new UnityEngine.Vector2(60f, 24f),
-                18f,
-                UnityEngine.Color.white,
-                Il2CppTMPro.TextAlignmentOptions.Left,
-                "ArcanaLabel");
+            // Check if arcana section already exists, if so just add another icon
+            var existingArcanaLabel = evoContainer.Find("ArcanaLabel");
+            float arcanaXPos;
+            float arcanaIconSize = 32f;  // Match evo icon size
 
-            xOffset += 65f;
+            if (existingArcanaLabel == null)
+            {
+                // First arcana - add "arc:" label right after evo icon
+                // Evo icon is at x=60, size 32, so ends at 92
+                arcanaXPos = 98f; // Start right after evo icon with small gap
 
-            // Create arcana icon
-            var iconObj = UIHelper.CreateIcon(
-                targetParent,
-                arcana.Sprite,
-                new UnityEngine.Vector2(xOffset, 0f),
-                IconSize,
-                containerName);
+                var (font, material) = UIHelper.GetFont(parent);
+                if (font != null)
+                {
+                    var labelObj = new UnityEngine.GameObject("ArcanaLabel");
+                    labelObj.transform.SetParent(evoContainer, false);
 
-            var iconImage = iconObj.GetComponent<UnityEngine.UI.Image>();
-            iconImage.raycastTarget = true;
+                    var labelRect = labelObj.AddComponent<UnityEngine.RectTransform>();
+                    labelRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+                    labelRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
+                    labelRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+                    labelRect.anchoredPosition = new UnityEngine.Vector2(arcanaXPos, 0f);
+                    labelRect.sizeDelta = new UnityEngine.Vector2(36f, 32f);  // Wider for "arc:" text
 
-            // Add hover trigger
+                    var labelTmp = labelObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                    labelTmp.font = font;
+                    labelTmp.text = "arc:";
+                    labelTmp.fontSize = 14f;
+                    labelTmp.color = new UnityEngine.Color(0.9f, 0.7f, 1f, 1f); // Purple tint
+                    labelTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+                    labelTmp.enableWordWrapping = false;
+                    labelTmp.overflowMode = Il2CppTMPro.TextOverflowModes.Overflow;
+                    labelTmp.raycastTarget = false;
+                }
+                arcanaXPos += 40f; // Move past label with extra spacing
+            }
+            else
+            {
+                // Find the last arcana icon and position after it
+                int iconIndex = 0;
+                while (evoContainer.Find($"ArcanaIcon_{iconIndex}") != null)
+                {
+                    iconIndex++;
+                }
+                // Each icon is 32px + 4px spacing
+                arcanaXPos = 98f + 40f + (iconIndex * 36f);
+            }
+
+            // Count existing arcana icons to get unique name
+            int existingCount = 0;
+            while (evoContainer.Find($"ArcanaIcon_{existingCount}") != null)
+            {
+                existingCount++;
+            }
+
+            // Create arcana icon (32x32 to match evo icon)
+            var iconObj = new UnityEngine.GameObject($"ArcanaIcon_{existingCount}");
+            iconObj.transform.SetParent(evoContainer, false);
+
+            var iconRect = iconObj.AddComponent<UnityEngine.RectTransform>();
+            iconRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+            iconRect.anchoredPosition = new UnityEngine.Vector2(arcanaXPos, 0f);
+            iconRect.sizeDelta = new UnityEngine.Vector2(arcanaIconSize, arcanaIconSize);
+
+            // Add purple background
+            var bgImage = iconObj.AddComponent<UnityEngine.UI.Image>();
+            bgImage.color = new UnityEngine.Color(0.5f, 0.25f, 0.65f, 1f);
+            bgImage.raycastTarget = true;
+
+            // Add arcana sprite as child (fills the icon with small padding)
+            var spriteObj = new UnityEngine.GameObject("ArcanaSprite");
+            spriteObj.transform.SetParent(iconObj.transform, false);
+            var spriteRect = spriteObj.AddComponent<UnityEngine.RectTransform>();
+            spriteRect.anchorMin = UnityEngine.Vector2.zero;
+            spriteRect.anchorMax = UnityEngine.Vector2.one;
+            spriteRect.offsetMin = new UnityEngine.Vector2(3f, 3f);
+            spriteRect.offsetMax = new UnityEngine.Vector2(-3f, -3f);
+
+            var spriteImage = spriteObj.AddComponent<UnityEngine.UI.Image>();
+            spriteImage.sprite = arcana.Sprite;
+            spriteImage.preserveAspect = true;
+            spriteImage.raycastTarget = false;
+
+            MelonLogger.Msg($"[UNIFIED] ArcanaDisplay - icon {existingCount} at x={arcanaXPos}");
+
+            // Add hover trigger with state tracking
             UIHelper.AddHoverTrigger(iconObj,
-                () => onShowPopup?.Invoke(iconObj.transform),
-                () => HidePopup());
+                () => {
+                    isMouseOverIndicator = true;
+                    onShowPopup?.Invoke(iconObj.transform);
+                },
+                () => {
+                    isMouseOverIndicator = false;
+                    MelonLoader.MelonCoroutines.Start(DelayedHideCheck());
+                });
 
             return iconObj;
         }
 
+        private static System.Collections.IEnumerator DelayedHideCheck()
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                yield return null;
+                if (isMouseOverIndicator || isMouseOverPopup)
+                    yield break;
+            }
+
+            if (!isMouseOverIndicator && !isMouseOverPopup)
+            {
+                HidePopup();
+            }
+        }
+
         /// <summary>
-        /// Shows the arcana popup with details.
+        /// Shows the arcana popup with full details - name, description, ALL affected items.
         /// </summary>
         public static void ShowPopup(
             UnityEngine.Transform anchor,
@@ -702,115 +900,236 @@ namespace VSEvolutionHelper
             object powerUpsDict,
             UIContext context)
         {
-            HidePopup();
+            int anchorId = anchor?.GetInstanceID() ?? 0;
+            bool popupExists = currentPopup != null && currentPopup;
 
-            if (arcana == null) return;
+            if (isCreatingPopup) return;
+            if (popupExists && currentAnchorId == anchorId && anchorId != 0) return;
+
+            isCreatingPopup = true;
+            currentAnchorId = anchorId;
+
+            if (popupExists)
+            {
+                UnityEngine.Object.Destroy(currentPopup);
+            }
+            currentPopup = null;
+
+            if (arcana == null)
+            {
+                isCreatingPopup = false;
+                return;
+            }
 
             // Find appropriate parent
             string parentName = context == UIContext.Merchant ? "View - Merchant" : "View - Level Up";
             var popupParent = UIHelper.FindParentByName(anchor, parentName);
 
-            // Create popup
+            // Create popup with purple theme
             currentPopup = UIHelper.CreatePopupBase(popupParent, "ArcanaPopup_Unified", PopupBgColor, PopupOutlineColor);
-            UIHelper.AddVerticalLayout(currentPopup, 10f, 5f);
+
+            var bgImg = currentPopup.GetComponent<UnityEngine.UI.Image>();
+            if (bgImg != null) bgImg.raycastTarget = true;
+
+            // Add hover tracking to popup
+            UIHelper.AddHoverTrigger(currentPopup,
+                () => { isMouseOverPopup = true; },
+                () => {
+                    isMouseOverPopup = false;
+                    MelonLoader.MelonCoroutines.Start(DelayedHideCheck());
+                });
+
+            // Manual layout - we'll position everything explicitly for better control
+            var popupRect = currentPopup.GetComponent<UnityEngine.RectTransform>();
 
             var (font, material) = UIHelper.GetFont(anchor);
 
-            // Title row with icon and name
+            float yOffset = -Padding;  // Start from top
+            // Calculate width based on icons, but ensure minimum width for description
+            float iconsWidth = Padding * 2 + (IconsPerRow * PopupIconSize) + ((IconsPerRow - 1) * IconSpacing);
+            float popupWidth = System.Math.Max(iconsWidth, PopupMinWidth);
+
+            // === TITLE SECTION: [Large Icon] Name ===
             var titleRow = new UnityEngine.GameObject("TitleRow");
             titleRow.transform.SetParent(currentPopup.transform, false);
-            UIHelper.AddHorizontalLayout(titleRow, 8f);
-            UIHelper.AddLayoutElement(titleRow, 250f, 28f);
+            var titleRect = titleRow.AddComponent<UnityEngine.RectTransform>();
+            titleRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+            titleRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+            titleRect.pivot = new UnityEngine.Vector2(0f, 1f);
+            titleRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+            titleRect.sizeDelta = new UnityEngine.Vector2(0f, TitleIconSize);
 
-            // Arcana icon in title
+            // Large arcana icon
             var titleIcon = new UnityEngine.GameObject("TitleIcon");
             titleIcon.transform.SetParent(titleRow.transform, false);
-            var titleIconImage = titleIcon.AddComponent<UnityEngine.UI.Image>();
-            titleIconImage.sprite = arcana.Sprite;
-            titleIconImage.preserveAspect = true;
-            UIHelper.AddLayoutElement(titleIcon, 24f, 24f);
+            var titleIconRect = titleIcon.AddComponent<UnityEngine.RectTransform>();
+            titleIconRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+            titleIconRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
+            titleIconRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+            titleIconRect.anchoredPosition = UnityEngine.Vector2.zero;
+            titleIconRect.sizeDelta = new UnityEngine.Vector2(TitleIconSize, TitleIconSize);
 
-            // Arcana name
+            // Purple background for icon
+            var iconBg = titleIcon.AddComponent<UnityEngine.UI.Image>();
+            iconBg.color = new UnityEngine.Color(0.4f, 0.2f, 0.5f, 1f);
+
+            // Arcana sprite as child
+            var spriteObj = new UnityEngine.GameObject("Sprite");
+            spriteObj.transform.SetParent(titleIcon.transform, false);
+            var spriteRect = spriteObj.AddComponent<UnityEngine.RectTransform>();
+            spriteRect.anchorMin = UnityEngine.Vector2.zero;
+            spriteRect.anchorMax = UnityEngine.Vector2.one;
+            spriteRect.offsetMin = new UnityEngine.Vector2(4f, 4f);
+            spriteRect.offsetMax = new UnityEngine.Vector2(-4f, -4f);
+            var spriteImg = spriteObj.AddComponent<UnityEngine.UI.Image>();
+            spriteImg.sprite = arcana.Sprite;
+            spriteImg.preserveAspect = true;
+
+            // Arcana name - large and prominent
             if (font != null)
             {
                 var nameObj = new UnityEngine.GameObject("Name");
                 nameObj.transform.SetParent(titleRow.transform, false);
-                UIHelper.AddLayoutElement(nameObj, 200f, 24f);
+                var nameRect = nameObj.AddComponent<UnityEngine.RectTransform>();
+                nameRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+                nameRect.anchorMax = new UnityEngine.Vector2(1f, 0.5f);
+                nameRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+                nameRect.anchoredPosition = new UnityEngine.Vector2(TitleIconSize + 10f, 0f);
+                nameRect.sizeDelta = new UnityEngine.Vector2(popupWidth - TitleIconSize - Padding * 2 - 10f, TitleIconSize);
 
                 var nameTmp = nameObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
                 nameTmp.font = font;
                 nameTmp.text = arcana.Name;
-                nameTmp.fontSize = 18f;
-                nameTmp.color = new UnityEngine.Color(0.9f, 0.7f, 1f, 1f); // Purple tint
+                nameTmp.fontSize = 22f;  // Large, readable
+                nameTmp.color = new UnityEngine.Color(1f, 0.85f, 1f, 1f);  // Light purple
                 nameTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+                nameTmp.fontStyle = Il2CppTMPro.FontStyles.Bold;
+                nameTmp.enableWordWrapping = true;
             }
 
-            // Description
+            yOffset -= TitleIconSize + SectionSpacing;
+
+            // === DESCRIPTION SECTION ===
+            float descHeight = 0f;
             if (font != null && !string.IsNullOrEmpty(arcana.Description))
             {
                 var descObj = new UnityEngine.GameObject("Description");
                 descObj.transform.SetParent(currentPopup.transform, false);
-                UIHelper.AddLayoutElement(descObj, 250f, 40f);
+                var descRect = descObj.AddComponent<UnityEngine.RectTransform>();
+                descRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                descRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+                descRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                descRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+                descRect.sizeDelta = new UnityEngine.Vector2(popupWidth - Padding * 2, 0f);  // Height will be set by ContentSizeFitter
 
                 var descTmp = descObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
                 descTmp.font = font;
                 descTmp.text = arcana.Description;
-                descTmp.fontSize = 12f;
-                descTmp.color = new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f);
-                descTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+                descTmp.fontSize = 15f;
+                descTmp.color = new UnityEngine.Color(0.9f, 0.85f, 0.95f, 1f);
+                descTmp.alignment = Il2CppTMPro.TextAlignmentOptions.TopLeft;
                 descTmp.enableWordWrapping = true;
+
+                // Use ContentSizeFitter to auto-size height based on text
+                var descFitter = descObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
+                descFitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.Unconstrained;
+                descFitter.verticalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+
+                // Force layout update to get actual height
+                UnityEngine.UI.LayoutRebuilder.ForceRebuildLayoutImmediate(descRect);
+                descHeight = descRect.sizeDelta.y > 0 ? descRect.sizeDelta.y : 60f;  // Fallback height
+
+                yOffset -= descHeight + SectionSpacing;
             }
 
-            // Affected weapons section
+            // === AFFECTED ITEMS SECTION ===
             if (arcana.AffectedWeaponTypes.Count > 0)
             {
-                // "Affects:" label
+                // Section header
                 if (font != null)
                 {
-                    var affectsLabel = new UnityEngine.GameObject("AffectsLabel");
-                    affectsLabel.transform.SetParent(currentPopup.transform, false);
-                    UIHelper.AddLayoutElement(affectsLabel, 250f, 18f);
+                    var headerObj = new UnityEngine.GameObject("AffectedHeader");
+                    headerObj.transform.SetParent(currentPopup.transform, false);
+                    var headerRect = headerObj.AddComponent<UnityEngine.RectTransform>();
+                    headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                    headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+                    headerRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                    headerRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+                    headerRect.sizeDelta = new UnityEngine.Vector2(popupWidth - Padding * 2, 20f);
 
-                    var affectsTmp = affectsLabel.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
-                    affectsTmp.font = font;
-                    affectsTmp.text = "Affects:";
-                    affectsTmp.fontSize = 14f;
-                    affectsTmp.color = new UnityEngine.Color(1f, 0.85f, 0.4f, 1f); // Gold
-                    affectsTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+                    var headerTmp = headerObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                    headerTmp.font = font;
+                    headerTmp.text = $"Affected Items ({arcana.AffectedWeaponTypes.Count}):";
+                    headerTmp.fontSize = 14f;
+                    headerTmp.color = new UnityEngine.Color(0.7f, 0.6f, 0.8f, 1f);
+                    headerTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+
+                    yOffset -= 22f;
                 }
 
-                // Weapon icons row
-                var iconsRow = new UnityEngine.GameObject("IconsRow");
-                iconsRow.transform.SetParent(currentPopup.transform, false);
-                UIHelper.AddHorizontalLayout(iconsRow, 4f);
+                // Create icons grid - all icons, wrapping to multiple rows
+                var iconsContainer = new UnityEngine.GameObject("IconsContainer");
+                iconsContainer.transform.SetParent(currentPopup.transform, false);
+                var iconsRect = iconsContainer.AddComponent<UnityEngine.RectTransform>();
+                iconsRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                iconsRect.anchorMax = new UnityEngine.Vector2(0f, 1f);  // Don't stretch
+                iconsRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                iconsRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
 
-                int iconsWidth = System.Math.Min(arcana.AffectedWeaponTypes.Count, 8) * ((int)IconSize + 4);
-                UIHelper.AddLayoutElement(iconsRow, iconsWidth, IconSize);
+                // Calculate grid dimensions first
+                float gridWidth = (IconsPerRow * PopupIconSize) + ((IconsPerRow - 1) * IconSpacing);
 
-                // Add weapon icons (max 8)
-                int shown = 0;
+                // Use GridLayoutGroup for automatic wrapping
+                var gridLayout = iconsContainer.AddComponent<UnityEngine.UI.GridLayoutGroup>();
+                gridLayout.cellSize = new UnityEngine.Vector2(PopupIconSize, PopupIconSize);
+                gridLayout.spacing = new UnityEngine.Vector2(IconSpacing, IconSpacing);
+                gridLayout.startCorner = UnityEngine.UI.GridLayoutGroup.Corner.UpperLeft;
+                gridLayout.startAxis = UnityEngine.UI.GridLayoutGroup.Axis.Horizontal;
+                gridLayout.childAlignment = (UnityEngine.TextAnchor)0;  // UpperLeft
+                gridLayout.constraint = UnityEngine.UI.GridLayoutGroup.Constraint.FixedColumnCount;
+                gridLayout.constraintCount = IconsPerRow;
+
+                // Add ALL weapon icons - no limit!
+                int iconCount = 0;
+                int spritesLoaded = 0;
                 foreach (var weaponType in arcana.AffectedWeaponTypes)
                 {
-                    if (shown >= 8) break;
-
                     var sprite = LoadWeaponSprite(weaponType, weaponsDict, powerUpsDict);
                     if (sprite != null)
                     {
-                        var wepIcon = new UnityEngine.GameObject($"Weapon_{shown}");
-                        wepIcon.transform.SetParent(iconsRow.transform, false);
+                        var wepIcon = new UnityEngine.GameObject($"Weapon_{iconCount}");
+                        wepIcon.transform.SetParent(iconsContainer.transform, false);
 
                         var wepImage = wepIcon.AddComponent<UnityEngine.UI.Image>();
                         wepImage.sprite = sprite;
                         wepImage.preserveAspect = true;
 
-                        UIHelper.AddLayoutElement(wepIcon, IconSize, IconSize);
-                        shown++;
+                        spritesLoaded++;
                     }
+                    iconCount++;
                 }
+
+                MelonLogger.Msg($"[UNIFIED] ArcanaPopup icons: {spritesLoaded} sprites loaded out of {arcana.AffectedWeaponTypes.Count} types");
+
+                // Calculate grid height based on loaded sprites
+                int numRows = (spritesLoaded + IconsPerRow - 1) / IconsPerRow;  // Ceiling division
+                float gridHeight = (numRows * PopupIconSize) + ((numRows > 1 ? numRows - 1 : 0) * IconSpacing);
+                iconsRect.sizeDelta = new UnityEngine.Vector2(gridWidth, gridHeight);
+
+                yOffset -= gridHeight;
             }
+
+            // Final popup size
+            yOffset -= Padding;  // Bottom padding
+            float totalHeight = -yOffset;  // yOffset is negative
+
+            popupRect.sizeDelta = new UnityEngine.Vector2(popupWidth, totalHeight);
 
             // Position popup
             PositionPopup(currentPopup, anchor, context);
+
+            MelonLogger.Msg($"[UNIFIED] ArcanaPopup created for {arcana.Name} with {arcana.AffectedWeaponTypes.Count} icons, size={popupWidth}x{totalHeight}");
+            isCreatingPopup = false;
         }
 
         private static void PositionPopup(UnityEngine.GameObject popup, UnityEngine.Transform anchor, UIContext context)
@@ -820,9 +1139,15 @@ namespace VSEvolutionHelper
 
             if (popupParent != null)
             {
-                // Convert anchor world position to popup parent's local space
                 var localPos = popupParent.InverseTransformPoint(anchor.position);
-                popupRect.anchoredPosition = new UnityEngine.Vector2(localPos.x + 60f, localPos.y);
+                // Position to the right of the anchor, vertically centered
+                float xOffset = context == UIContext.Merchant ? 80f : 50f;  // More offset for large popup
+                float popupHeight = popupRect.sizeDelta.y;
+                // Anchor at top-left of popup, offset down by half height to center
+                popupRect.anchorMin = new UnityEngine.Vector2(0.5f, 0.5f);
+                popupRect.anchorMax = new UnityEngine.Vector2(0.5f, 0.5f);
+                popupRect.pivot = new UnityEngine.Vector2(0f, 0.5f);  // Left-center pivot
+                popupRect.anchoredPosition = new UnityEngine.Vector2(localPos.x + xOffset, localPos.y);
             }
         }
 
@@ -831,19 +1156,34 @@ namespace VSEvolutionHelper
         /// </summary>
         public static void HidePopup()
         {
-            if (currentPopup != null)
+            isCreatingPopup = false;
+            isMouseOverPopup = false;
+            bool popupExists = currentPopup != null && currentPopup;
+            if (popupExists)
             {
                 UnityEngine.Object.Destroy(currentPopup);
                 currentPopup = null;
+                currentAnchorId = 0;
             }
         }
 
-        // Helper to load weapon sprite (reuse existing logic)
+        // Helper to load weapon sprite using existing logic
         private static UnityEngine.Sprite LoadWeaponSprite(WeaponType weaponType, object weaponsDict, object powerUpsDict)
         {
-            // This will be filled in by referencing existing sprite loading code
-            // For now, return null - we'll wire this up when migrating
-            return null;
+            try
+            {
+                // Try weapons dict first
+                var sprite = LevelUpItemUI_SetWeaponData_Patch.TryLoadFromWeapons(weaponType, weaponsDict);
+                if (sprite != null) return sprite;
+
+                // Try powerups
+                sprite = LevelUpItemUI_SetWeaponData_Patch.TryLoadFromPowerUps(weaponType, powerUpsDict);
+                return sprite;
+            }
+            catch
+            {
+                return null;
+            }
         }
     }
 
@@ -1520,7 +1860,7 @@ namespace VSEvolutionHelper
             return null;
         }
 
-        private static UnityEngine.Sprite TryLoadFromPowerUps(WeaponType reqType, object powerUpsDict, bool debug = false)
+        public static UnityEngine.Sprite TryLoadFromPowerUps(WeaponType reqType, object powerUpsDict, bool debug = false)
         {
             try
             {
@@ -4738,27 +5078,48 @@ namespace VSEvolutionHelper
                 if (weaponsDict == null || powerUpsDict == null) return;
 
                 // Build evolution formulas (may have multiple)
-                var formulas = BuildEvolutionFormulas(d, t, weaponsDict, powerUpsDict);
-                if (formulas == null || formulas.Count == 0) return;
+                var oldFormulas = BuildEvolutionFormulas(d, t, weaponsDict, powerUpsDict);
+                if (oldFormulas == null || oldFormulas.Count == 0) return;
 
-                // Add evolution icon to the shop item
-                AddEvoIconToShopItem(transform, formulas, weaponsDict, powerUpsDict);
+                // Convert to unified format
+                var formulas = ConvertToUnifiedFormulas(oldFormulas);
 
-                // Check for arcana - try weapon first, then item (PowerUp)
+                // Use unified EvolutionDisplay
+                EvolutionDisplay.ShowIndicator(
+                    transform,
+                    formulas,
+                    UIContext.Merchant,
+                    (anchor) => EvolutionDisplay.ShowPopup(anchor, formulas, UIContext.Merchant));
+
                 // Check for arcana - try weapon first, then item/PowerUp
+                MelonLogger.Msg($"[Merchant] Checking arcana for weapon type: {t}");
                 var arcanaInfo = LevelUpItemUI_SetWeaponData_Patch.GetActiveArcanaForWeaponFromDataManager(dataManager, t);
-
-                // If not found as weapon, try as item/PowerUp using the same integer value
+                MelonLogger.Msg($"[Merchant] Weapon arcana check: HasValue={arcanaInfo.HasValue}, sprite={(arcanaInfo.HasValue && arcanaInfo.Value.sprite != null ? "exists" : "null")}");
                 if (!arcanaInfo.HasValue || arcanaInfo.Value.sprite == null)
                 {
                     var itemType = (ItemType)(int)t;
+                    MelonLogger.Msg($"[Merchant] Trying item arcana for type: {itemType}");
                     arcanaInfo = LevelUpItemUI_SetWeaponData_Patch.GetActiveArcanaForItemFromDataManager(dataManager, itemType);
+                    MelonLogger.Msg($"[Merchant] Item arcana check: HasValue={arcanaInfo.HasValue}, sprite={(arcanaInfo.HasValue && arcanaInfo.Value.sprite != null ? "exists" : "null")}");
                 }
 
                 if (arcanaInfo.HasValue && arcanaInfo.Value.sprite != null)
                 {
                     var affectedTypes = LevelUpItemUI_SetWeaponData_Patch.GetArcanaAffectedWeaponTypes(arcanaInfo.Value.arcanaData);
-                    AddArcanaIconToShopItem(transform, arcanaInfo.Value.name, arcanaInfo.Value.description, arcanaInfo.Value.sprite, affectedTypes, weaponsDict, powerUpsDict);
+                    var arcana = new ArcanaInfo
+                    {
+                        Name = arcanaInfo.Value.name,
+                        Description = arcanaInfo.Value.description,
+                        Sprite = arcanaInfo.Value.sprite,
+                        ArcanaData = arcanaInfo.Value.arcanaData,
+                        AffectedWeaponTypes = affectedTypes
+                    };
+                    ArcanaDisplay.ShowIndicator(
+                        transform,
+                        arcana,
+                        UIContext.Merchant,
+                        90f, // xOffset after evo indicator
+                        (anchor) => ArcanaDisplay.ShowPopup(anchor, arcana, weaponsDict, powerUpsDict, UIContext.Merchant));
                 }
             }
             catch (System.Exception ex)
@@ -4776,6 +5137,29 @@ namespace VSEvolutionHelper
             var formulas = FindWeaponsUsingItem(weaponType, weaponsDict, powerUpsDict);
 
             return formulas;
+        }
+
+        /// <summary>
+        /// Converts old formula format to unified EvolutionFormula format.
+        /// </summary>
+        public static System.Collections.Generic.List<EvolutionFormula> ConvertToUnifiedFormulas(System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> oldFormulas)
+        {
+            var result = new System.Collections.Generic.List<EvolutionFormula>();
+            foreach (var old in oldFormulas)
+            {
+                var newFormula = new EvolutionFormula
+                {
+                    ResultSprite = old.ResultSprite,
+                    ResultName = old.ResultName,
+                    CanEvolve = old.PrimaryWeaponOwned
+                };
+                foreach (var ing in old.Ingredients)
+                {
+                    newFormula.Ingredients.Add((ing.sprite, ing.owned, ""));
+                }
+                result.Add(newFormula);
+            }
+            return result;
         }
 
         private static System.Collections.Generic.List<LevelUpItemUI_SetWeaponData_Patch.EvolutionFormula> FindWeaponsUsingItem(WeaponType itemType, object weaponsDict, object powerUpsDict)
@@ -5458,20 +5842,38 @@ namespace VSEvolutionHelper
                 if (weaponsDict == null || powerUpsDict == null) return;
 
                 // Find all weapons that use this powerup for evolution
-                var formulas = FindWeaponsUsingPowerUp(itemType, weaponsDict, powerUpsDict);
-                if (formulas.Count == 0) return;
+                var oldFormulas = FindWeaponsUsingPowerUp(itemType, weaponsDict, powerUpsDict);
+                if (oldFormulas.Count == 0) return;
 
-                MelonLogger.Msg($"[Merchant] Found {formulas.Count} evolutions for powerup {itemType}");
+                MelonLogger.Msg($"[Merchant] Found {oldFormulas.Count} evolutions for powerup {itemType}");
 
-                // Add evolution icon
-                AddEvoIconForPowerUp(transform, formulas, weaponsDict, powerUpsDict);
+                // Convert to unified format and use unified display
+                var formulas = ShopItemUI_SetWeaponData_Patch.ConvertToUnifiedFormulas(oldFormulas);
+                EvolutionDisplay.ShowIndicator(
+                    transform,
+                    formulas,
+                    UIContext.Merchant,
+                    (anchor) => EvolutionDisplay.ShowPopup(anchor, formulas, UIContext.Merchant));
 
                 // Check for arcana
                 var arcanaInfo = LevelUpItemUI_SetWeaponData_Patch.GetActiveArcanaForItemFromDataManager(dataManager, itemType);
                 if (arcanaInfo.HasValue && arcanaInfo.Value.sprite != null)
                 {
                     var affectedTypes = LevelUpItemUI_SetWeaponData_Patch.GetArcanaAffectedWeaponTypes(arcanaInfo.Value.arcanaData);
-                    ShopItemUI_SetWeaponData_Patch.AddArcanaIconToShopItem(transform, arcanaInfo.Value.name, arcanaInfo.Value.description, arcanaInfo.Value.sprite, affectedTypes, weaponsDict, powerUpsDict);
+                    var arcana = new ArcanaInfo
+                    {
+                        Name = arcanaInfo.Value.name,
+                        Description = arcanaInfo.Value.description,
+                        Sprite = arcanaInfo.Value.sprite,
+                        ArcanaData = arcanaInfo.Value.arcanaData,
+                        AffectedWeaponTypes = affectedTypes
+                    };
+                    ArcanaDisplay.ShowIndicator(
+                        transform,
+                        arcana,
+                        UIContext.Merchant,
+                        90f,
+                        (anchor) => ArcanaDisplay.ShowPopup(anchor, arcana, weaponsDict, powerUpsDict, UIContext.Merchant));
                 }
             }
             catch (System.Exception ex)
@@ -5778,4 +6180,7 @@ namespace VSEvolutionHelper
             popupObj.transform.SetAsLastSibling();
         }
     }
+
+#endif // End of disabled patches
+
 }
