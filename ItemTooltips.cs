@@ -1,0 +1,4416 @@
+using MelonLoader;
+using HarmonyLib;
+using System;
+using System.Reflection;
+using System.Collections.Generic;
+using System.Linq;
+using Il2CppVampireSurvivors.Data;
+using Il2CppVampireSurvivors.Data.Weapons;
+using Il2CppVampireSurvivors.Objects;
+using Il2CppVampireSurvivors.UI;
+
+// NEW MOD ARCHITECTURE:
+// This file implements universal item tooltips - any weapon/item icon becomes hoverable
+// when the game is paused (level-up, merchant, pause menu).
+//
+// To switch to this mod:
+// 1. In Class1.cs, change the MelonInfo to point to VSItemTooltips.ItemTooltipsMod
+// 2. Or rename this file and update accordingly
+//
+// Currently this is a work-in-progress skeleton.
+
+namespace VSItemTooltips
+{
+    /// <summary>
+    /// Main mod class - adds hover tooltips to all weapon/item icons when game is paused.
+    /// Instead of patching specific UI windows, this hooks into any Image component
+    /// that displays a weapon/item sprite and makes it hoverable.
+    /// </summary>
+    public class ItemTooltipsMod : MelonMod
+    {
+        private static HarmonyLib.Harmony harmonyInstance;
+
+        // State tracking
+        private static bool wasGamePaused = false;
+
+        // Popup stack for recursive popups
+        private static List<UnityEngine.GameObject> popupStack = new List<UnityEngine.GameObject>();
+        private static List<int> popupAnchorIds = new List<int>();
+        private static int mouseOverPopupIndex = -1; // -1 = not over any popup, 0+ = index in stack
+
+        // Legacy single popup references (for compatibility)
+        private static UnityEngine.GameObject currentPopup { get { return popupStack.Count > 0 ? popupStack[popupStack.Count - 1] : null; } }
+        private static int currentPopupAnchorId { get { return popupAnchorIds.Count > 0 ? popupAnchorIds[popupAnchorIds.Count - 1] : 0; } }
+
+        // Tracked icons
+        private static Dictionary<int, TrackedIcon> trackedIcons = new Dictionary<int, TrackedIcon>();
+        private static float lastScanTime = 0f;
+        private static float scanInterval = 0.1f; // Scan every 100ms
+
+        // UI element to weapon/item type mapping (set by SetWeaponData/SetItemData patches)
+        private static Dictionary<int, WeaponType> uiToWeaponType = new Dictionary<int, WeaponType>();
+        private static Dictionary<int, ItemType> uiToItemType = new Dictionary<int, ItemType>();
+
+        // Sprite name to item type lookup (built on first use)
+        private static Dictionary<string, WeaponType> spriteToWeaponType = null;
+        private static Dictionary<string, ItemType> spriteToItemType = null;
+        private static bool lookupTablesBuilt = false;
+
+        // Data manager cache
+        private static object cachedDataManager = null;
+        private static object cachedWeaponsDict = null;
+        private static object cachedPowerUpsDict = null;
+
+        // Game session cache (for accessing player inventory)
+        private static object cachedGameSession = null;
+
+        // Styling
+        private static readonly UnityEngine.Color PopupBgColor = new UnityEngine.Color(0.08f, 0.08f, 0.12f, 0.98f);
+        private static readonly UnityEngine.Color PopupBorderColor = new UnityEngine.Color(0.5f, 0.5f, 0.7f, 1f);
+        private static readonly float IconSize = 48f;
+        private static readonly float SmallIconSize = 40f;
+        private static readonly float Padding = 12f;
+        private static readonly float Spacing = 8f;
+
+        public override void OnInitializeMelon()
+        {
+            harmonyInstance = new HarmonyLib.Harmony("com.nihil.vsitemtooltips");
+            ApplyPatches();
+            MelonLogger.Msg("VS Item Tooltips initialized!");
+        }
+
+        private void ApplyPatches()
+        {
+            try
+            {
+                // Patch to capture DataManager when LevelUpPage is shown
+                var levelUpPageType = typeof(LevelUpPage);
+                MelonLogger.Msg($"LevelUpPage type: {levelUpPageType.FullName}");
+
+                // Try OnShowStart first (called when page is shown)
+                var showMethod = levelUpPageType.GetMethod("OnShowStart", BindingFlags.Public | BindingFlags.Instance);
+                if (showMethod != null)
+                {
+                    MelonLogger.Msg($"Found OnShowStart method: {showMethod.GetParameters().Length} params");
+                    harmonyInstance.Patch(showMethod,
+                        postfix: new HarmonyMethod(typeof(LevelUpPagePatches), nameof(LevelUpPagePatches.Show_Postfix)));
+                    MelonLogger.Msg("Patched LevelUpPage.OnShowStart");
+                }
+                else
+                {
+                    MelonLogger.Warning("LevelUpPage.OnShowStart method not found!");
+                }
+
+                // Try to find and patch MerchantPage (name may vary)
+                TryPatchMerchantPage();
+
+                // Patch LevelUpItemUI.SetWeaponData to track which UI elements have which weapons
+                TryPatchLevelUpItemUI();
+
+                // Patch EquipmentIconPause for pause screen icons
+                TryPatchEquipmentIconPause();
+
+                MelonLogger.Msg("Patches applied successfully");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Error($"Failed to apply patches: {ex}");
+            }
+        }
+
+        private void TryPatchLevelUpItemUI()
+        {
+            try
+            {
+                // Search for LevelUpItemUI type
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        var itemUIType = assembly.GetTypes()
+                            .FirstOrDefault(t => t.Name == "LevelUpItemUI");
+
+                        if (itemUIType != null)
+                        {
+                            MelonLogger.Msg($"Found LevelUpItemUI: {itemUIType.FullName}");
+
+                            var setWeaponMethod = itemUIType.GetMethod("SetWeaponData", BindingFlags.Public | BindingFlags.Instance);
+                            if (setWeaponMethod != null)
+                            {
+                                harmonyInstance.Patch(setWeaponMethod,
+                                    postfix: new HarmonyMethod(typeof(LevelUpItemUIPatches), nameof(LevelUpItemUIPatches.SetWeaponData_Postfix)));
+                                MelonLogger.Msg("Patched LevelUpItemUI.SetWeaponData");
+                            }
+                            else
+                            {
+                                MelonLogger.Warning("SetWeaponData method not found on LevelUpItemUI");
+                            }
+
+                            var setItemMethod = itemUIType.GetMethod("SetItemData", BindingFlags.Public | BindingFlags.Instance);
+                            if (setItemMethod != null)
+                            {
+                                harmonyInstance.Patch(setItemMethod,
+                                    postfix: new HarmonyMethod(typeof(LevelUpItemUIPatches), nameof(LevelUpItemUIPatches.SetItemData_Postfix)));
+                                MelonLogger.Msg("Patched LevelUpItemUI.SetItemData");
+                            }
+                            else
+                            {
+                                MelonLogger.Warning("SetItemData method not found on LevelUpItemUI");
+                            }
+
+                            return;
+                        }
+                    }
+                    catch { }
+                }
+                MelonLogger.Warning("LevelUpItemUI type not found in any assembly");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Error($"Error patching LevelUpItemUI: {ex}");
+            }
+        }
+
+        private void TryPatchEquipmentIconPause()
+        {
+            try
+            {
+                MelonLogger.Msg("Searching for equipment icon types...");
+
+                // Search ALL types that might be icon/equipment related
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (!assembly.FullName.Contains("Il2Cpp")) continue;
+
+                    try
+                    {
+                        var iconTypes = assembly.GetTypes()
+                            .Where(t => t.Name.ToLower().Contains("icon") ||
+                                       t.Name.ToLower().Contains("equipment") ||
+                                       t.Name.ToLower().Contains("itemui") ||
+                                       t.Name.ToLower().Contains("arcana") ||
+                                       t.Name.ToLower().Contains("evolution") ||
+                                       t.Name.ToLower().Contains("weaponui") ||
+                                       t.Name.ToLower().Contains("powerup"))
+                            .Take(30);
+
+                        foreach (var iconType in iconTypes)
+                        {
+                            // Log all found types
+                            MelonLogger.Msg($"Found type: {iconType.FullName}");
+
+                            // Look for methods that take WeaponType or ItemType
+                            var interestingMethods = iconType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                                .Where(m => m.GetParameters().Any(p =>
+                                    p.ParameterType == typeof(WeaponType) ||
+                                    p.ParameterType == typeof(ItemType) ||
+                                    p.ParameterType.Name.Contains("Weapon") ||
+                                    p.ParameterType.Name.Contains("Item")))
+                                .Take(5);
+
+                            foreach (var m in interestingMethods)
+                            {
+                                var parms = string.Join(", ", m.GetParameters().Select(p => $"{p.ParameterType.Name} {p.Name}"));
+                                MelonLogger.Msg($"  -> {m.Name}({parms})");
+
+                                // Try to patch methods that look like they set weapon/item data
+                                if (m.Name.Contains("Set") || m.Name.Contains("Init") || m.Name.Contains("Setup") ||
+                                    m.Name.Contains("Add") || m.Name.Contains("Spawn") || m.Name.Contains("Create"))
+                                {
+                                    try
+                                    {
+                                        // Find which parameter is WeaponType or ItemType
+                                        var allParams = m.GetParameters();
+                                        int weaponParamIndex = -1;
+                                        int itemParamIndex = -1;
+
+                                        for (int pi = 0; pi < allParams.Length; pi++)
+                                        {
+                                            if (allParams[pi].ParameterType == typeof(WeaponType))
+                                                weaponParamIndex = pi;
+                                            else if (allParams[pi].ParameterType == typeof(ItemType))
+                                                itemParamIndex = pi;
+                                        }
+
+                                        if (weaponParamIndex >= 0)
+                                        {
+                                            // Use different patch method based on parameter position
+                                            string patchMethod;
+                                            switch (weaponParamIndex)
+                                            {
+                                                case 0: patchMethod = nameof(GenericIconPatches.SetWeapon_Postfix); break;
+                                                case 1: patchMethod = nameof(GenericIconPatches.SetWeapon_Postfix_Arg1); break;
+                                                default: patchMethod = nameof(GenericIconPatches.SetWeapon_Postfix_ArgN); break;
+                                            }
+
+                                            harmonyInstance.Patch(m,
+                                                postfix: new HarmonyMethod(typeof(GenericIconPatches), patchMethod));
+                                            MelonLogger.Msg($"  PATCHED: {iconType.Name}.{m.Name} (weapon, param {weaponParamIndex})");
+                                        }
+                                        else if (itemParamIndex >= 0)
+                                        {
+                                            string patchMethod;
+                                            switch (itemParamIndex)
+                                            {
+                                                case 0: patchMethod = nameof(GenericIconPatches.SetItem_Postfix); break;
+                                                case 1: patchMethod = nameof(GenericIconPatches.SetItem_Postfix_Arg1); break;
+                                                default: patchMethod = nameof(GenericIconPatches.SetItem_Postfix_ArgN); break;
+                                            }
+
+                                            harmonyInstance.Patch(m,
+                                                postfix: new HarmonyMethod(typeof(GenericIconPatches), patchMethod));
+                                            MelonLogger.Msg($"  PATCHED: {iconType.Name}.{m.Name} (item, param {itemParamIndex})");
+                                        }
+                                    }
+                                    catch (Exception patchEx)
+                                    {
+                                        MelonLogger.Warning($"  Failed to patch: {patchEx.Message}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error searching for icon types: {ex.Message}");
+            }
+        }
+
+        private void TryPatchMerchantPage()
+        {
+            try
+            {
+                // Search for MerchantPage type in loaded assemblies
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        var merchantType = assembly.GetTypes()
+                            .FirstOrDefault(t => t.Name.Contains("Merchant") && t.Name.Contains("Page"));
+
+                        if (merchantType != null)
+                        {
+                            var showMethod = merchantType.GetMethod("Show", BindingFlags.Public | BindingFlags.Instance);
+                            if (showMethod != null)
+                            {
+                                harmonyInstance.Patch(showMethod,
+                                    postfix: new HarmonyMethod(typeof(GenericPagePatches), nameof(GenericPagePatches.Show_Postfix)));
+                                MelonLogger.Msg($"Patched {merchantType.Name}.Show");
+                                return;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Could not patch MerchantPage: {ex.Message}");
+            }
+        }
+
+        private static float lastTimeScaleLog = 0f;
+        private static bool escWasPressed = false;
+        private static bool triedEarlyCaching = false;
+
+        public override void OnSceneWasLoaded(int buildIndex, string sceneName)
+        {
+            MelonLogger.Msg($"Scene loaded: {sceneName} (index {buildIndex})");
+
+            // Reset caching state when a new scene loads
+            triedEarlyCaching = false;
+        }
+
+        private void TryEarlyCaching()
+        {
+            if (triedEarlyCaching) return;
+            if (cachedDataManager != null && cachedWeaponsDict != null) return;
+
+            triedEarlyCaching = true;
+
+            try
+            {
+                // Try to find DataManager from various sources
+                MelonLogger.Msg("Attempting early DataManager caching...");
+
+                // Method 1: Try FindObjectOfType for DataManager directly
+                var dataManagerType = System.AppDomain.CurrentDomain.GetAssemblies()
+                    .SelectMany(a => { try { return a.GetTypes(); } catch { return new System.Type[0]; } })
+                    .FirstOrDefault(t => t.Name == "DataManager" && t.Namespace != null && t.Namespace.Contains("VampireSurvivors"));
+
+                if (dataManagerType != null)
+                {
+                    MelonLogger.Msg($"Found DataManager type: {dataManagerType.FullName}");
+
+                    // Try to find via Unity's FindObjectOfType
+                    var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new System.Type[0]);
+                    if (findMethod != null)
+                    {
+                        var genericMethod = findMethod.MakeGenericMethod(dataManagerType);
+                        var dm = genericMethod.Invoke(null, null);
+                        if (dm != null)
+                        {
+                            MelonLogger.Msg($"Found DataManager via FindObjectOfType!");
+                            CacheDataManager(dm);
+                            return;
+                        }
+                    }
+                }
+
+                // Method 2: Try GameManager.Instance.Data
+                var gameManagerType = System.AppDomain.CurrentDomain.GetAssemblies()
+                    .SelectMany(a => { try { return a.GetTypes(); } catch { return new System.Type[0]; } })
+                    .FirstOrDefault(t => t.Name == "GameManager");
+
+                if (gameManagerType != null)
+                {
+                    // Try all static properties and fields to find instance
+                    var allStaticMembers = gameManagerType.GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+
+                    object instance = null;
+                    foreach (var member in allStaticMembers)
+                    {
+                        try
+                        {
+                            if (member is PropertyInfo prop && prop.PropertyType == gameManagerType)
+                            {
+                                instance = prop.GetValue(null);
+                                if (instance != null)
+                                {
+                                    MelonLogger.Msg($"Found GameManager via {prop.Name}");
+                                    break;
+                                }
+                            }
+                            else if (member is FieldInfo field && field.FieldType == gameManagerType)
+                            {
+                                instance = field.GetValue(null);
+                                if (instance != null)
+                                {
+                                    MelonLogger.Msg($"Found GameManager via field {field.Name}");
+                                    break;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    if (instance != null)
+                    {
+                        // Try to get Data property
+                        var allProps = instance.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        foreach (var prop in allProps)
+                        {
+                            if (prop.Name == "Data" || prop.PropertyType.Name.Contains("DataManager"))
+                            {
+                                try
+                                {
+                                    var val = prop.GetValue(instance);
+                                    if (val != null)
+                                    {
+                                        MelonLogger.Msg($"Found DataManager via GameManager.{prop.Name}!");
+                                        CacheDataManager(val);
+                                        return;
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                }
+
+                // Method 3: Search all MonoBehaviours for one with GetConvertedWeapons method
+                var allBehaviours = UnityEngine.Object.FindObjectsOfType<UnityEngine.MonoBehaviour>();
+                foreach (var mb in allBehaviours.Take(100))
+                {
+                    var getWeaponsMethod = mb.GetType().GetMethod("GetConvertedWeapons");
+                    if (getWeaponsMethod != null)
+                    {
+                        MelonLogger.Msg($"Found DataManager via MonoBehaviour search: {mb.GetType().Name}");
+                        CacheDataManager(mb);
+                        return;
+                    }
+                }
+
+                MelonLogger.Msg("Early caching: DataManager not found yet");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Early caching failed: {ex.Message}");
+            }
+        }
+
+        public override void OnUpdate()
+        {
+            // Try to cache data early (once per scene)
+            if (!triedEarlyCaching && cachedDataManager == null)
+            {
+                TryEarlyCaching();
+            }
+
+            // Detect ESC key press to find pause menu
+            if (UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.Escape))
+            {
+                escWasPressed = true;
+                MelonLogger.Msg("ESC pressed! Scanning for pause UI...");
+
+                // Search for Safe Area and log all children
+                var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
+                if (safeArea != null)
+                {
+                    MelonLogger.Msg($"Safe Area found, {safeArea.transform.childCount} children:");
+                    for (int i = 0; i < safeArea.transform.childCount; i++)
+                    {
+                        var child = safeArea.transform.GetChild(i);
+                        MelonLogger.Msg($"  [{i}] {child.name} active={child.gameObject.activeInHierarchy}");
+
+                        // If this child is active and looks like a pause view, cache it
+                        if (child.gameObject.activeInHierarchy &&
+                            (child.name.ToLower().Contains("map") || child.name.ToLower().Contains("pause")))
+                        {
+                            pauseView = child.gameObject;
+                            MelonLogger.Msg($"  -> Set as pauseView!");
+                        }
+                    }
+                }
+                else
+                {
+                    MelonLogger.Msg("Safe Area not found!");
+
+                    // Try alternative paths
+                    string[] altPaths = new string[] {
+                        "GAME UI/Canvas - Game UI",
+                        "GAME UI",
+                        "Canvas"
+                    };
+                    foreach (var path in altPaths)
+                    {
+                        var found = UnityEngine.GameObject.Find(path);
+                        if (found != null)
+                        {
+                            MelonLogger.Msg($"Found: {path} with {found.transform.childCount} children");
+                            for (int i = 0; i < found.transform.childCount && i < 10; i++)
+                            {
+                                var child = found.transform.GetChild(i);
+                                MelonLogger.Msg($"  [{i}] {child.name}");
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            bool isGamePaused = IsGamePaused();
+
+            // State change: became paused
+            if (isGamePaused && !wasGamePaused)
+            {
+                // Log which views triggered the pause
+                var activeViewNames = new System.Collections.Generic.List<string>();
+                if (levelUpView != null && levelUpView.activeInHierarchy) activeViewNames.Add("LevelUp");
+                if (merchantView != null && merchantView.activeInHierarchy) activeViewNames.Add("Merchant");
+                if (pauseView != null && pauseView.activeInHierarchy) activeViewNames.Add("Pause");
+                if (itemFoundView != null && itemFoundView.activeInHierarchy) activeViewNames.Add("ItemFound");
+                if (arcanaView != null && arcanaView.activeInHierarchy) activeViewNames.Add("Arcana");
+                if (activeViewNames.Count == 0) activeViewNames.Add("timeScale=0");
+
+                MelonLogger.Msg($"Game paused via: {string.Join(", ", activeViewNames)} - enabling tooltips");
+                ClearTrackedIcons();
+
+                // If paused, scan the pause view for equipment icons
+                if (pauseView != null && pauseView.activeInHierarchy)
+                {
+                    ScanPauseViewForEquipment(pauseView);
+                }
+
+                // Allow re-searching for HUD if not found yet
+                if (hudInventory == null && inGameUIFound)
+                {
+                    hudSearched = false;
+                }
+
+                // Try to get game session if we don't have it yet
+                if (cachedGameSession == null)
+                {
+                    TryFindGameSession();
+                }
+
+                // Setup HUD hovers when paused
+                if (hudInventory != null && cachedGameSession != null)
+                {
+                    SetupHUDHovers();
+                }
+            }
+
+            // State change: became unpaused
+            if (!isGamePaused && wasGamePaused)
+            {
+                MelonLogger.Msg("Game unpaused - disabling tooltips");
+                HidePopup();
+                ClearTrackedIcons();
+                loggedScanStatus = false; // Reset so we can warn again if needed
+                loggedScanResults = false;
+                scannedPauseView = false; // Rescan pause view next time
+            }
+
+            // Reset view caches if we've returned to main menu (views destroyed)
+            if (!isGamePaused && levelUpView == null && merchantView == null && pauseView == null && itemFoundView == null)
+            {
+                if (inGameUIFound)
+                {
+                    MelonLogger.Msg("Returned to main menu - resetting view caches");
+                    inGameUIFound = false;
+                    hudSearched = false;
+                    hudInventory = null;
+                }
+            }
+
+            wasGamePaused = isGamePaused;
+
+            // Only process when game is paused
+            if (!isGamePaused) return;
+
+            // Throttle scanning
+            float currentTime = UnityEngine.Time.unscaledTime;
+            if (currentTime - lastScanTime >= scanInterval)
+            {
+                lastScanTime = currentTime;
+                ScanForIcons();
+            }
+        }
+
+        #region Pause Detection
+
+        // Cached UI view references (popup/menu views)
+        private static UnityEngine.GameObject levelUpView = null;
+        private static UnityEngine.GameObject merchantView = null;
+        private static UnityEngine.GameObject pauseView = null;
+        private static UnityEngine.GameObject itemFoundView = null;
+        private static UnityEngine.GameObject arcanaView = null;
+
+        // Cached HUD elements (always visible, but only hoverable when paused)
+        private static UnityEngine.GameObject hudInventory = null;
+        private static bool hudSearched = false;
+        private static bool inGameUIFound = false; // True once we've confirmed game UI exists
+
+        // Currently active views (for targeted scanning)
+        private static List<UnityEngine.Transform> activeUIContainers = new List<UnityEngine.Transform>();
+
+        private static bool triedFindingPauseView = false;
+
+        private static bool IsGamePaused()
+        {
+            activeUIContainers.Clear();
+
+            // Find views if not cached
+            if (levelUpView == null)
+                levelUpView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - Level Up");
+            if (merchantView == null)
+                merchantView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - Merchant");
+            if (itemFoundView == null)
+                itemFoundView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - ItemFound");
+            if (arcanaView == null)
+            {
+                arcanaView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - ArcanaMainSelection");
+                if (arcanaView != null)
+                    MelonLogger.Msg("Found arcana view!");
+            }
+
+            // Try multiple paths for pause view
+            if (pauseView == null)
+            {
+                string[] pausePaths = new string[]
+                {
+                    "GAME UI/Canvas - Game UI/Safe Area/View - Paused",  // Correct path!
+                    "GAME UI/Canvas - Game UI/Safe Area/View - Pause",
+                    "GAME UI/Canvas - Game UI/Safe Area/View - Map"
+                };
+
+                foreach (var path in pausePaths)
+                {
+                    pauseView = UnityEngine.GameObject.Find(path);
+                    if (pauseView != null)
+                    {
+                        MelonLogger.Msg($"Found pause view at: {path}");
+                        break;
+                    }
+                }
+
+                // If still not found, search for any view with "pause" or "map" in name
+                if (pauseView == null && !triedFindingPauseView)
+                {
+                    triedFindingPauseView = true;
+                    var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
+                    if (safeArea != null)
+                    {
+                        MelonLogger.Msg("Searching Safe Area children for pause view:");
+                        for (int i = 0; i < safeArea.transform.childCount; i++)
+                        {
+                            var child = safeArea.transform.GetChild(i);
+                            MelonLogger.Msg($"  Child: {child.name}");
+                            if (child.name.ToLower().Contains("pause") || child.name.ToLower().Contains("map"))
+                            {
+                                pauseView = child.gameObject;
+                                MelonLogger.Msg($"Found pause view: {child.name}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if we're in a game by seeing if any view was found
+            bool anyViewFound = levelUpView != null || merchantView != null || pauseView != null || itemFoundView != null;
+
+            // Only search for HUD once we've confirmed game UI exists (i.e., we're in a game)
+            if (!hudSearched && anyViewFound && !inGameUIFound)
+            {
+                inGameUIFound = true;
+                hudSearched = true;
+
+                // Common paths for the HUD inventory display
+                string[] hudPaths = new string[]
+                {
+                    "GAME UI/Canvas - Game UI/Safe Area/View - Game/PlayerGUI/Inventory",
+                    "GAME UI/Canvas - Game UI/Safe Area/View - Game/Inventory",
+                    "GAME UI/Canvas - Game UI/Safe Area/PlayerGUI/Inventory",
+                    "GAME UI/Canvas - Game UI/Safe Area/View - Game/PlayerGUI",
+                    "GAME UI/Canvas - Game UI/Safe Area/View - Game"
+                };
+
+                foreach (var path in hudPaths)
+                {
+                    hudInventory = UnityEngine.GameObject.Find(path);
+                    if (hudInventory != null)
+                    {
+                        MelonLogger.Msg($"Found HUD inventory at: {path}");
+                        break;
+                    }
+                }
+
+                if (hudInventory == null)
+                {
+                    MelonLogger.Msg("HUD inventory not found yet - will retry when game is paused");
+                }
+            }
+
+            bool isPaused = false;
+
+            // Check each popup/menu view and track which are active
+            if (levelUpView != null && levelUpView.activeInHierarchy)
+            {
+                activeUIContainers.Add(levelUpView.transform);
+                isPaused = true;
+            }
+
+            if (merchantView != null && merchantView.activeInHierarchy)
+            {
+                activeUIContainers.Add(merchantView.transform);
+                isPaused = true;
+            }
+
+            if (pauseView != null && pauseView.activeInHierarchy)
+            {
+                activeUIContainers.Add(pauseView.transform);
+                isPaused = true;
+            }
+
+            if (itemFoundView != null && itemFoundView.activeInHierarchy)
+            {
+                activeUIContainers.Add(itemFoundView.transform);
+                isPaused = true;
+            }
+
+            if (arcanaView != null && arcanaView.activeInHierarchy)
+            {
+                activeUIContainers.Add(arcanaView.transform);
+                isPaused = true;
+                if (!wasGamePaused)
+                    MelonLogger.Msg("Arcana view detected as active!");
+            }
+
+            // Also check time scale as fallback
+            if (!isPaused && UnityEngine.Time.timeScale == 0f)
+            {
+                // Log once when we detect pause via timeScale
+                if (!wasGamePaused)
+                {
+                    MelonLogger.Msg("Detected pause via timeScale=0, searching for pause UI...");
+
+                    // Search for any active view that might be the pause screen
+                    var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
+                    if (safeArea != null)
+                    {
+                        for (int i = 0; i < safeArea.transform.childCount; i++)
+                        {
+                            var child = safeArea.transform.GetChild(i);
+                            if (child.gameObject.activeInHierarchy)
+                            {
+                                MelonLogger.Msg($"  Active view: {child.name}");
+                                // Add any active view as a container
+                                if (child.name.Contains("View") || child.name.Contains("Map") || child.name.Contains("Pause"))
+                                {
+                                    activeUIContainers.Add(child);
+                                    if (pauseView == null && (child.name.ToLower().Contains("map") || child.name.ToLower().Contains("pause")))
+                                    {
+                                        pauseView = child.gameObject;
+                                        MelonLogger.Msg($"  Set as pauseView: {child.name}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        MelonLogger.Warning("Safe Area not found!");
+                    }
+                }
+                isPaused = true;
+            }
+
+            // If paused by any means, also include the HUD inventory for scanning
+            // (it's always visible, but we only want hovers when paused)
+            if (isPaused && hudInventory != null && hudInventory.activeInHierarchy)
+            {
+                activeUIContainers.Add(hudInventory.transform);
+            }
+
+            return isPaused;
+        }
+
+        #endregion
+
+        #region Icon Tracking
+
+        /// <summary>
+        /// Tracks a UI Image that displays a weapon/item icon.
+        /// </summary>
+        private class TrackedIcon
+        {
+            public UnityEngine.UI.Image Image;
+            public WeaponType? WeaponType;
+            public ItemType? ItemType;
+            public string SpriteName;
+            public int InstanceId;
+            public UnityEngine.EventSystems.EventTrigger EventTrigger;
+        }
+
+        private static bool loggedScanStatus = false;
+        private static bool loggedScanResults = false;
+
+        private static void ScanForIcons()
+        {
+            // Only scan if we have active UI containers
+            if (activeUIContainers.Count == 0)
+                return;
+
+            // Build lookup tables if needed
+            if (!lookupTablesBuilt)
+            {
+                BuildLookupTables();
+                if (!lookupTablesBuilt && !loggedScanStatus)
+                {
+                    MelonLogger.Warning("Lookup tables not built - no DataManager cached yet. Hovers won't work until level-up.");
+                    loggedScanStatus = true;
+                }
+            }
+
+            int totalImages = 0;
+            int matchedImages = 0;
+
+            // Only scan Image components within active UI containers
+            foreach (var container in activeUIContainers)
+            {
+                if (container == null) continue;
+
+                // Get all Image components in this container's hierarchy
+                var images = container.GetComponentsInChildren<UnityEngine.UI.Image>(false); // false = only active
+                totalImages += images.Length;
+
+                foreach (var image in images)
+                {
+                    if (image == null || image.sprite == null) continue;
+
+                    int instanceId = image.GetInstanceID();
+
+                    // Skip if already tracked and still valid
+                    if (trackedIcons.TryGetValue(instanceId, out var existing))
+                    {
+                        // Check if sprite changed
+                        if (existing.SpriteName == image.sprite.name)
+                            continue;
+                        else
+                        {
+                            // Sprite changed, remove old tracking
+                            RemoveTracking(existing);
+                            trackedIcons.Remove(instanceId);
+                        }
+                    }
+
+                    // Try to identify this sprite
+                    string spriteName = image.sprite.name;
+                    WeaponType? weaponType = null;
+                    ItemType? itemType = null;
+
+                    if (spriteToWeaponType != null && spriteToWeaponType.TryGetValue(spriteName, out var wt))
+                    {
+                        weaponType = wt;
+                    }
+                    else if (spriteToItemType != null && spriteToItemType.TryGetValue(spriteName, out var it))
+                    {
+                        itemType = it;
+                    }
+
+                    // If we identified this as an item, add hover tracking
+                    if (weaponType.HasValue || itemType.HasValue)
+                    {
+                        matchedImages++;
+                        var tracked = new TrackedIcon
+                        {
+                            Image = image,
+                            WeaponType = weaponType,
+                            ItemType = itemType,
+                            SpriteName = spriteName,
+                            InstanceId = instanceId
+                        };
+
+                        // Add event trigger for hover
+                        AddHoverToIcon(tracked);
+                        trackedIcons[instanceId] = tracked;
+                    }
+                }
+            }
+
+            // Log scan results once
+            if (!loggedScanResults && totalImages > 0)
+            {
+                loggedScanResults = true;
+                MelonLogger.Msg($"Scanned {totalImages} images, matched {matchedImages}, tracking {trackedIcons.Count} icons");
+
+                // Log a few sample sprite names to help debug
+                if (matchedImages == 0 && spriteToWeaponType != null && spriteToWeaponType.Count > 0)
+                {
+                    MelonLogger.Msg("Sample lookup keys (first 3):");
+                    int i = 0;
+                    foreach (var key in spriteToWeaponType.Keys)
+                    {
+                        if (i++ >= 3) break;
+                        MelonLogger.Msg($"  Lookup: '{key}'");
+                    }
+
+                    // Log some actual sprite names from the UI
+                    MelonLogger.Msg("Sample sprite names from UI (first 5):");
+                    i = 0;
+                    foreach (var container in activeUIContainers)
+                    {
+                        if (container == null) continue;
+                        var imgs = container.GetComponentsInChildren<UnityEngine.UI.Image>(false);
+                        foreach (var img in imgs)
+                        {
+                            if (img?.sprite != null && i++ < 5)
+                            {
+                                MelonLogger.Msg($"  Sprite: '{img.sprite.name}'");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clean up stale entries
+            var staleIds = new List<int>();
+            foreach (var kvp in trackedIcons)
+            {
+                if (kvp.Value.Image == null || !kvp.Value.Image)
+                {
+                    staleIds.Add(kvp.Key);
+                }
+            }
+            foreach (var id in staleIds)
+            {
+                trackedIcons.Remove(id);
+            }
+        }
+
+        private static void AddHoverToIcon(TrackedIcon tracked)
+        {
+            var go = tracked.Image.gameObject;
+
+            // Check if already has event trigger
+            var existing = go.GetComponent<UnityEngine.EventSystems.EventTrigger>();
+            if (existing != null) return;
+
+            // Make sure image is raycast target
+            tracked.Image.raycastTarget = true;
+
+            var eventTrigger = go.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+            tracked.EventTrigger = eventTrigger;
+
+            // Capture values for closure
+            var weaponType = tracked.WeaponType;
+            var itemType = tracked.ItemType;
+
+            var enterEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            enterEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter;
+            enterEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                ShowItemPopup(tracked.Image.transform, weaponType, itemType);
+            }));
+            eventTrigger.triggers.Add(enterEntry);
+
+            var exitEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
+            exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                // Delay hide to allow moving to popup
+                MelonLoader.MelonCoroutines.Start(DelayedHideCheck());
+            }));
+            eventTrigger.triggers.Add(exitEntry);
+        }
+
+        private static void RemoveTracking(TrackedIcon tracked)
+        {
+            if (tracked.EventTrigger != null)
+            {
+                UnityEngine.Object.Destroy(tracked.EventTrigger);
+            }
+        }
+
+        private static void ClearTrackedIcons()
+        {
+            foreach (var kvp in trackedIcons)
+            {
+                RemoveTracking(kvp.Value);
+            }
+            trackedIcons.Clear();
+        }
+
+        private static bool scannedPauseView = false;
+
+        private static void ScanPauseViewForEquipment(UnityEngine.GameObject pauseViewGo)
+        {
+            if (scannedPauseView) return;
+            scannedPauseView = true;
+
+            MelonLogger.Msg("Scanning pause view for equipment icons...");
+
+            // Find the EquipmentPanel
+            var equipmentPanel = FindChildRecursive(pauseViewGo.transform, "EquipmentPanel");
+            if (equipmentPanel == null)
+            {
+                MelonLogger.Warning("EquipmentPanel not found!");
+                return;
+            }
+
+            MelonLogger.Msg($"Found EquipmentPanel with {equipmentPanel.childCount} children");
+
+            // Find WeaponsPanel and AccessoryPanel
+            var weaponsPanel = equipmentPanel.Find("WeaponsPanel");
+            var accessoryPanel = equipmentPanel.Find("AccessoryPanel");
+
+            MelonLogger.Msg($"WeaponsPanel: {(weaponsPanel != null ? $"{weaponsPanel.childCount} children" : "null")}");
+            MelonLogger.Msg($"AccessoryPanel: {(accessoryPanel != null ? $"{accessoryPanel.childCount} children" : "null")}");
+
+            int weaponCount = 0;
+            int accessoryCount = 0;
+
+            if (weaponsPanel != null)
+            {
+                weaponCount = SetupEquipmentIconHovers(weaponsPanel, true);
+            }
+
+            if (accessoryPanel != null)
+            {
+                accessoryCount = SetupEquipmentIconHovers(accessoryPanel, false);
+            }
+
+            MelonLogger.Msg($"Added hovers to {weaponCount} weapons and {accessoryCount} accessories on pause screen");
+        }
+
+        private static int SetupEquipmentIconHovers(UnityEngine.Transform panel, bool isWeapons)
+        {
+            int count = 0;
+
+            for (int i = 0; i < panel.childCount; i++)
+            {
+                var child = panel.GetChild(i);
+                if (!child.name.Contains("EquipmentIconPause")) continue;
+
+                // Try to get the component and its type property
+                var components = child.GetComponents<UnityEngine.Component>();
+                WeaponType? weaponType = null;
+                ItemType? itemType = null;
+
+                foreach (var comp in components)
+                {
+                    if (comp == null) continue;
+                    var compType = comp.GetType();
+
+                    // Skip Unity built-in components
+                    if (compType.Namespace != null && compType.Namespace.StartsWith("UnityEngine")) continue;
+
+                    // Log component for debugging (first icon only)
+                    if (count == 0)
+                    {
+                        MelonLogger.Msg($"  Component on icon: {compType.FullName}");
+
+                        // List properties
+                        var props = compType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+                        foreach (var prop in props.Take(10))
+                        {
+                            try
+                            {
+                                var val = prop.GetValue(comp);
+                                MelonLogger.Msg($"    {prop.Name}: {val}");
+                            }
+                            catch { }
+                        }
+                    }
+
+                    // Try to get Type or WeaponType or ItemType property
+                    var typeProp = compType.GetProperty("Type", BindingFlags.Public | BindingFlags.Instance);
+                    if (typeProp != null)
+                    {
+                        var typeVal = typeProp.GetValue(comp);
+                        if (typeVal is WeaponType wt)
+                        {
+                            weaponType = wt;
+                            MelonLogger.Msg($"  Found weapon: {wt}");
+                        }
+                        else if (typeVal is ItemType it)
+                        {
+                            itemType = it;
+                            MelonLogger.Msg($"  Found accessory: {it}");
+                        }
+                    }
+
+                    // Also try _type field
+                    var typeField = compType.GetField("_type", BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (typeField != null && weaponType == null && itemType == null)
+                    {
+                        var typeVal = typeField.GetValue(comp);
+                        if (typeVal is WeaponType wt)
+                        {
+                            weaponType = wt;
+                        }
+                        else if (typeVal is ItemType it)
+                        {
+                            itemType = it;
+                        }
+                    }
+                }
+
+                // Add hover if we found a type
+                if (weaponType.HasValue || itemType.HasValue)
+                {
+                    AddHoverToGameObject(child.gameObject, weaponType, itemType);
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private static void LogHierarchy(UnityEngine.Transform t, int depth, int maxDepth)
+        {
+            if (depth > maxDepth) return;
+
+            string indent = new string(' ', depth * 2);
+            var img = t.GetComponent<UnityEngine.UI.Image>();
+            string imgInfo = img != null && img.sprite != null ? $" [sprite: {img.sprite.name}]" : "";
+
+            MelonLogger.Msg($"{indent}{t.name}{imgInfo}");
+
+            for (int i = 0; i < t.childCount && i < 10; i++)
+            {
+                LogHierarchy(t.GetChild(i), depth + 1, maxDepth);
+            }
+
+            if (t.childCount > 10)
+            {
+                MelonLogger.Msg($"{indent}  ... and {t.childCount - 10} more children");
+            }
+        }
+
+        private static UnityEngine.Transform FindChildRecursive(UnityEngine.Transform parent, string name)
+        {
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                var child = parent.GetChild(i);
+                if (child.name.ToLower().Contains(name.ToLower()))
+                    return child;
+
+                var found = FindChildRecursive(child, name);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static string GetFullPath(UnityEngine.Transform t)
+        {
+            string path = t.name;
+            var parent = t.parent;
+            while (parent != null)
+            {
+                path = parent.name + "/" + path;
+                parent = parent.parent;
+            }
+            return path;
+        }
+
+        private static System.Collections.IEnumerator DelayedHideCheck()
+        {
+            // Capture current stack size
+            int stackSizeAtStart = popupStack.Count;
+
+            // Wait frames to give time to reach popup
+            for (int i = 0; i < 10; i++)
+            {
+                yield return null;
+            }
+
+            // Only hide all if:
+            // 1. Not hovering over any popup (mouseOverPopupIndex == -1)
+            // 2. Stack hasn't grown (no new popup opened)
+            if (mouseOverPopupIndex < 0 && popupStack.Count <= stackSizeAtStart && popupStack.Count > 0)
+            {
+                HideAllPopups();
+            }
+        }
+
+        private static System.Collections.IEnumerator DelayedStackHideCheck(int exitedPopupIndex)
+        {
+            // Capture current stack size
+            int stackSizeAtStart = popupStack.Count;
+
+            // Wait frames to allow moving to child/sibling elements
+            for (int i = 0; i < 10; i++)
+            {
+                yield return null;
+            }
+
+            // If stack grew (new child popup opened), don't hide anything
+            if (popupStack.Count > stackSizeAtStart)
+            {
+                yield break;
+            }
+
+            // If mouse is over this popup or a child, don't hide
+            if (mouseOverPopupIndex >= exitedPopupIndex)
+            {
+                yield break;
+            }
+
+            // Close everything ABOVE the currently hovered popup
+            // This handles the case where you jump from Child directly to Grandparent -
+            // both Child and Parent should close
+            int closeFromIndex = mouseOverPopupIndex + 1;
+            if (closeFromIndex < 0) closeFromIndex = 0; // If not over any popup, close all
+
+            while (popupStack.Count > closeFromIndex)
+            {
+                HideTopPopup();
+            }
+        }
+
+        #endregion
+
+        #region Lookup Tables
+
+        private static void BuildLookupTables()
+        {
+            if (lookupTablesBuilt) return;
+
+            spriteToWeaponType = new Dictionary<string, WeaponType>();
+            spriteToItemType = new Dictionary<string, ItemType>();
+
+            try
+            {
+                // Build from weapons dictionary if available
+                if (cachedWeaponsDict != null)
+                {
+                    BuildWeaponLookup(cachedWeaponsDict);
+                }
+
+                // Build from powerups dictionary if available
+                if (cachedPowerUpsDict != null)
+                {
+                    BuildPowerUpLookup(cachedPowerUpsDict);
+                }
+
+                lookupTablesBuilt = spriteToWeaponType.Count > 0 || spriteToItemType.Count > 0;
+
+                if (lookupTablesBuilt)
+                {
+                    MelonLogger.Msg($"Built lookup tables: {spriteToWeaponType.Count} weapons, {spriteToItemType.Count} items");
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Error($"Failed to build lookup tables: {ex}");
+            }
+        }
+
+        private static void BuildWeaponLookup(object weaponsDict)
+        {
+            MelonLogger.Msg("BuildWeaponLookup starting...");
+            try
+            {
+                // Get dictionary entries using reflection
+                var dictType = weaponsDict.GetType();
+                MelonLogger.Msg($"Dict type: {dictType.FullName}");
+
+                var keysProperty = dictType.GetProperty("Keys");
+                if (keysProperty == null)
+                {
+                    MelonLogger.Warning("Keys property not found!");
+                    return;
+                }
+
+                var keys = keysProperty.GetValue(weaponsDict);
+                MelonLogger.Msg($"Keys type: {keys?.GetType().FullName ?? "null"}");
+
+                int count = 0;
+                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
+                var moveNext = enumerator.GetType().GetMethod("MoveNext");
+                var current = enumerator.GetType().GetProperty("Current");
+
+                while ((bool)moveNext.Invoke(enumerator, null))
+                {
+                    count++;
+                    var key = current.GetValue(enumerator);
+
+                    if (key is WeaponType wt)
+                    {
+                        var indexer = dictType.GetProperty("Item");
+                        if (indexer != null)
+                        {
+                            // Value is a List<WeaponData>, not a single WeaponData
+                            var dataList = indexer.GetValue(weaponsDict, new object[] { key });
+                            if (dataList != null)
+                            {
+                                // Get count and iterate the list
+                                var listType = dataList.GetType();
+                                var countProp = listType.GetProperty("Count");
+                                var listIndexer = listType.GetProperty("Item");
+
+                                if (countProp != null && listIndexer != null)
+                                {
+                                    int listCount = (int)countProp.GetValue(dataList);
+                                    for (int i = 0; i < listCount; i++)
+                                    {
+                                        var data = listIndexer.GetValue(dataList, new object[] { i }) as WeaponData;
+                                        if (data != null && !string.IsNullOrEmpty(data.frameName))
+                                        {
+                                            spriteToWeaponType[data.frameName] = wt;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                MelonLogger.Msg($"Iterated {count} weapon keys, added {spriteToWeaponType.Count} to lookup");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error building weapon lookup: {ex}");
+            }
+        }
+
+        private static void BuildPowerUpLookup(object powerUpsDict)
+        {
+            try
+            {
+                var dictType = powerUpsDict.GetType();
+                MelonLogger.Msg($"PowerUp dict type: {dictType.Name}");
+
+                var keysProperty = dictType.GetProperty("Keys");
+                if (keysProperty == null) return;
+
+                var keys = keysProperty.GetValue(powerUpsDict);
+                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
+                var moveNext = enumerator.GetType().GetMethod("MoveNext");
+                var current = enumerator.GetType().GetProperty("Current");
+
+                int count = 0;
+                while ((bool)moveNext.Invoke(enumerator, null))
+                {
+                    count++;
+                    var key = current.GetValue(enumerator);
+                    if (key is ItemType it)
+                    {
+                        var indexer = dictType.GetProperty("Item");
+                        if (indexer != null)
+                        {
+                            var dataOrList = indexer.GetValue(powerUpsDict, new object[] { key });
+                            if (dataOrList != null)
+                            {
+                                // Check if it's a List or single item
+                                var dataType = dataOrList.GetType();
+                                if (count == 1)
+                                    MelonLogger.Msg($"PowerUp value type: {dataType.Name}");
+
+                                // Try as List first
+                                var countProp = dataType.GetProperty("Count");
+                                if (countProp != null)
+                                {
+                                    // It's a list
+                                    var listIndexer = dataType.GetProperty("Item");
+                                    int listCount = (int)countProp.GetValue(dataOrList);
+                                    for (int i = 0; i < listCount; i++)
+                                    {
+                                        var data = listIndexer.GetValue(dataOrList, new object[] { i });
+                                        AddPowerUpToLookup(data, it);
+                                    }
+                                }
+                                else
+                                {
+                                    // Single item
+                                    AddPowerUpToLookup(dataOrList, it);
+                                }
+                            }
+                        }
+                    }
+                }
+                MelonLogger.Msg($"Iterated {count} powerup keys, added {spriteToItemType.Count} to lookup");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error building powerup lookup: {ex.Message}");
+            }
+        }
+
+        private static void AddPowerUpToLookup(object data, ItemType it)
+        {
+            if (data == null) return;
+
+            string frameName = null;
+
+            // Try property first
+            var frameNameProp = data.GetType().GetProperty("frameName", BindingFlags.Public | BindingFlags.Instance);
+            if (frameNameProp != null)
+            {
+                frameName = frameNameProp.GetValue(data) as string;
+            }
+
+            // Try field if property didn't work
+            if (string.IsNullOrEmpty(frameName))
+            {
+                var frameNameField = data.GetType().GetField("frameName", BindingFlags.Public | BindingFlags.Instance);
+                if (frameNameField != null)
+                {
+                    frameName = frameNameField.GetValue(data) as string;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(frameName))
+            {
+                spriteToItemType[frameName] = it;
+            }
+        }
+
+        public static void CacheGameSession(object gameSession)
+        {
+            cachedGameSession = gameSession;
+            MelonLogger.Msg($"[CacheGameSession] Cached session: {gameSession?.GetType().Name}, cachedDataManager is null: {cachedDataManager == null}");
+
+            // Also cache DataManager from the session if we don't have it yet
+            if (cachedDataManager == null && gameSession != null)
+            {
+                try
+                {
+                    var sessionType = gameSession.GetType();
+
+                    // For IL2CPP, try calling get_Data() method directly
+                    var getDataMethod = sessionType.GetMethod("get_Data", BindingFlags.Public | BindingFlags.Instance);
+                    if (getDataMethod != null)
+                    {
+                        var dataManager = getDataMethod.Invoke(gameSession, null);
+                        if (dataManager != null)
+                        {
+                            CacheDataManager(dataManager);
+                            MelonLogger.Msg("Also cached DataManager from GameSession.get_Data()");
+                            return;
+                        }
+                    }
+
+                    // Log all methods to see what's available
+                    var allMethods = sessionType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .Where(m => m.Name.Contains("Data") || m.Name.Contains("get_"))
+                        .Select(m => m.Name)
+                        .Take(15)
+                        .ToList();
+                    MelonLogger.Msg($"[CacheGameSession] Session methods with Data/get_: {string.Join(", ", allMethods)}");
+
+                    MelonLogger.Warning("[CacheGameSession] Could not find Data on GameSession");
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning($"Error caching DataManager from session: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Tries to find and cache the game session from various sources.
+        /// Called when paused but we don't have the session cached yet.
+        /// </summary>
+        private static void TryFindGameSession()
+        {
+            MelonLogger.Msg("[TryFindGameSession] Searching for game session...");
+
+            try
+            {
+                // Method 0: Try to find GameSessionData using Unity's FindObjectOfType
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (!assembly.FullName.Contains("Il2Cpp")) continue;
+
+                    try
+                    {
+                        var gameSessionType = assembly.GetTypes()
+                            .FirstOrDefault(t => t.Name == "GameSessionData");
+
+                        if (gameSessionType != null)
+                        {
+                            MelonLogger.Msg($"[TryFindGameSession] Found GameSessionData type, trying FindObjectOfType...");
+
+                            // Use reflection to call UnityEngine.Object.FindObjectOfType<GameSessionData>()
+                            var findMethod = typeof(UnityEngine.Object).GetMethods()
+                                .FirstOrDefault(m => m.Name == "FindObjectOfType" && m.IsGenericMethod && m.GetParameters().Length == 0);
+
+                            if (findMethod != null)
+                            {
+                                var genericMethod = findMethod.MakeGenericMethod(gameSessionType);
+                                var session = genericMethod.Invoke(null, null);
+
+                                if (session != null)
+                                {
+                                    var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                                    if (charProp != null)
+                                    {
+                                        cachedGameSession = session;
+                                        MelonLogger.Msg($"[TryFindGameSession] Found via FindObjectOfType<GameSessionData>!");
+                                        return;
+                                    }
+                                }
+                                else
+                                {
+                                    MelonLogger.Msg($"[TryFindGameSession] FindObjectOfType<GameSessionData> returned null");
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MelonLogger.Msg($"[TryFindGameSession] Error with FindObjectOfType: {ex.Message}");
+                    }
+                }
+
+                // Method 0.5: Try to find "Game" GameObject and get GameManager component
+                // Based on UnityExplorer showing path: Game/GameManager.GameSessionData
+                try
+                {
+                    var gameObj = UnityEngine.GameObject.Find("Game");
+                    if (gameObj != null)
+                    {
+                        MelonLogger.Msg($"[TryFindGameSession] Found 'Game' GameObject");
+
+                        // Get all components and look for GameManager
+                        var components = gameObj.GetComponents<UnityEngine.Component>();
+                        foreach (var comp in components)
+                        {
+                            if (comp == null) continue;
+                            var compType = comp.GetType();
+                            MelonLogger.Msg($"[TryFindGameSession] Game component: {compType.Name}");
+
+                            if (compType.Name.Contains("GameManager"))
+                            {
+                                MelonLogger.Msg($"[TryFindGameSession] Found GameManager component!");
+
+                                // Try to get GameSessionData property
+                                var sessionProp = compType.GetProperty("GameSessionData", BindingFlags.Public | BindingFlags.Instance);
+                                if (sessionProp != null)
+                                {
+                                    var session = sessionProp.GetValue(comp);
+                                    if (session != null)
+                                    {
+                                        MelonLogger.Msg($"[TryFindGameSession] Got GameSessionData: {session.GetType().Name}");
+                                        CacheGameSession(session);
+
+                                        // Also try to get DataManager
+                                        GenericIconPatches.TryCacheDataManagerFromGameManager(comp);
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        MelonLogger.Msg($"[TryFindGameSession] GameSessionData property is null");
+                                    }
+                                }
+                                else
+                                {
+                                    // List available properties
+                                    var props = compType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                                        .Select(p => p.Name).Take(20).ToList();
+                                    MelonLogger.Msg($"[TryFindGameSession] GameManager properties: {string.Join(", ", props)}");
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        MelonLogger.Msg($"[TryFindGameSession] 'Game' GameObject not found");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Msg($"[TryFindGameSession] Error finding Game object: {ex.Message}");
+                }
+
+                // Method 1: Look for GameSessionData type with static Instance
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (!assembly.FullName.Contains("Il2Cpp")) continue;
+
+                    try
+                    {
+                        // Look for types that might be game sessions
+                        var sessionTypes = assembly.GetTypes()
+                            .Where(t => t.Name.Contains("GameSession") || t.Name == "GameManager")
+                            .Take(5);
+
+                        foreach (var sessionType in sessionTypes)
+                        {
+                            // Try static Instance property
+                            var instanceProp = sessionType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+                            if (instanceProp != null)
+                            {
+                                try
+                                {
+                                    var instance = instanceProp.GetValue(null);
+                                    if (instance != null)
+                                    {
+                                        var activeCharProp = instance.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                                        if (activeCharProp != null)
+                                        {
+                                            cachedGameSession = instance;
+                                            MelonLogger.Msg($"[TryFindGameSession] Found via {sessionType.Name}.Instance");
+                                            return;
+                                        }
+                                    }
+                                }
+                                catch { }
+                            }
+
+                            // Try static _instance field
+                            var instanceField = sessionType.GetField("_instance", BindingFlags.NonPublic | BindingFlags.Static);
+                            if (instanceField == null)
+                                instanceField = sessionType.GetField("instance", BindingFlags.NonPublic | BindingFlags.Static);
+
+                            if (instanceField != null)
+                            {
+                                try
+                                {
+                                    var instance = instanceField.GetValue(null);
+                                    if (instance != null)
+                                    {
+                                        var activeCharProp = instance.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                                        if (activeCharProp != null)
+                                        {
+                                            cachedGameSession = instance;
+                                            MelonLogger.Msg($"[TryFindGameSession] Found via {sessionType.Name}._instance");
+                                            return;
+                                        }
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // Method 2: Search all components on active views for _gameSession property
+                var viewsToSearch = new List<UnityEngine.GameObject>();
+                if (pauseView != null && pauseView.activeInHierarchy) viewsToSearch.Add(pauseView);
+                if (merchantView != null && merchantView.activeInHierarchy) viewsToSearch.Add(merchantView);
+                if (levelUpView != null && levelUpView.activeInHierarchy) viewsToSearch.Add(levelUpView);
+                if (arcanaView != null && arcanaView.activeInHierarchy) viewsToSearch.Add(arcanaView);
+
+                foreach (var view in viewsToSearch)
+                {
+                    // Get ALL components on this view and children
+                    var components = view.GetComponentsInChildren<UnityEngine.Component>(true);
+                    foreach (var comp in components)
+                    {
+                        if (comp == null) continue;
+                        if (TryGetSessionFromComponent(comp))
+                        {
+                            MelonLogger.Msg($"[TryFindGameSession] Found via component {comp.GetType().Name}");
+                            return;
+                        }
+                    }
+                }
+
+                MelonLogger.Msg("[TryFindGameSession] Could not find game session");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error finding game session: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Tries to get game session from a component. Returns true if found.
+        /// </summary>
+        private static bool TryGetSessionFromComponent(UnityEngine.Component component)
+        {
+            var type = component.GetType();
+
+            // Try common property names for game session
+            string[] sessionNames = { "_gameSession", "GameSession", "Session", "gameSession" };
+
+            foreach (var name in sessionNames)
+            {
+                try
+                {
+                    var prop = type.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (prop != null)
+                    {
+                        var session = prop.GetValue(component);
+                        if (session != null)
+                        {
+                            // Verify it has ActiveCharacter
+                            var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                            if (charProp != null)
+                            {
+                                cachedGameSession = session;
+                                MelonLogger.Msg($"Found GameSession from {type.Name}.{name}");
+                                return true;
+                            }
+                        }
+                    }
+
+                    var field = type.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (field != null)
+                    {
+                        var session = field.GetValue(component);
+                        if (session != null)
+                        {
+                            var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                            if (charProp != null)
+                            {
+                                cachedGameSession = session;
+                                MelonLogger.Msg($"Found GameSession from {type.Name}.{name} field");
+                                return true;
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Scans the HUD inventory and adds hovers to weapon/item icons.
+        /// Called when the game is paused and HUD is found.
+        /// </summary>
+        public static void SetupHUDHovers()
+        {
+            if (cachedGameSession == null || hudInventory == null) return;
+
+            try
+            {
+                // Get ActiveCharacter from game session
+                var activeCharProp = cachedGameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                if (activeCharProp == null) return;
+
+                var activeChar = activeCharProp.GetValue(cachedGameSession);
+                if (activeChar == null) return;
+
+                // Get weapons from WeaponsManager.ActiveEquipment
+                var weaponsManagerProp = activeChar.GetType().GetProperty("WeaponsManager", BindingFlags.Public | BindingFlags.Instance);
+                if (weaponsManagerProp != null)
+                {
+                    var weaponsManager = weaponsManagerProp.GetValue(activeChar);
+                    if (weaponsManager != null)
+                    {
+                        var activeEquipProp = weaponsManager.GetType().GetProperty("ActiveEquipment", BindingFlags.Public | BindingFlags.Instance);
+                        if (activeEquipProp != null)
+                        {
+                            var equipList = activeEquipProp.GetValue(weaponsManager);
+                            SetupHUDSlots(equipList, true);
+                        }
+                    }
+                }
+
+                // Get accessories from AccessoriesManager.ActiveEquipment
+                var accessoriesManagerProp = activeChar.GetType().GetProperty("AccessoriesManager", BindingFlags.Public | BindingFlags.Instance);
+                if (accessoriesManagerProp != null)
+                {
+                    var accessoriesManager = accessoriesManagerProp.GetValue(activeChar);
+                    if (accessoriesManager != null)
+                    {
+                        var activeEquipProp = accessoriesManager.GetType().GetProperty("ActiveEquipment", BindingFlags.Public | BindingFlags.Instance);
+                        if (activeEquipProp != null)
+                        {
+                            var equipList = activeEquipProp.GetValue(accessoriesManager);
+                            SetupHUDSlots(equipList, false);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error setting up HUD hovers: {ex.Message}");
+            }
+        }
+
+        private static void SetupHUDSlots(object equipList, bool isWeapons)
+        {
+            if (equipList == null || hudInventory == null) return;
+
+            try
+            {
+                var listType = equipList.GetType();
+                var countProp = listType.GetProperty("Count");
+                var indexer = listType.GetProperty("Item");
+
+                if (countProp == null || indexer == null) return;
+
+                int count = (int)countProp.GetValue(equipList);
+                MelonLogger.Msg($"Found {count} {(isWeapons ? "weapons" : "accessories")} in player inventory");
+
+                // Find slot containers in HUD (look for children with slot-like names)
+                var slotContainer = hudInventory.transform.Find(isWeapons ? "Weapons" : "Accessories");
+                if (slotContainer == null)
+                    slotContainer = hudInventory.transform.Find(isWeapons ? "WeaponSlots" : "AccessorySlots");
+                if (slotContainer == null)
+                    slotContainer = hudInventory.transform; // Use the inventory itself
+
+                var slots = new List<UnityEngine.Transform>();
+                for (int i = 0; i < slotContainer.childCount; i++)
+                {
+                    slots.Add(slotContainer.GetChild(i));
+                }
+
+                // Match equipment to slots
+                for (int i = 0; i < count && i < slots.Count; i++)
+                {
+                    var equipment = indexer.GetValue(equipList, new object[] { i });
+                    if (equipment == null) continue;
+
+                    var typeProp = equipment.GetType().GetProperty("Type", BindingFlags.Public | BindingFlags.Instance);
+                    if (typeProp == null) continue;
+
+                    var typeValue = typeProp.GetValue(equipment);
+                    var slotGo = slots[i].gameObject;
+
+                    // Find icon in slot
+                    var iconGo = FindIconInUI(slotGo);
+                    var targetGo = iconGo ?? slotGo;
+
+                    if (isWeapons && typeValue is WeaponType wt)
+                    {
+                        AddHoverToGameObject(targetGo, wt, null);
+                        MelonLogger.Msg($"Added HUD hover for weapon: {wt}");
+                    }
+                    else if (!isWeapons && typeValue is ItemType it)
+                    {
+                        AddHoverToGameObject(targetGo, null, it);
+                        MelonLogger.Msg($"Added HUD hover for item: {it}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in SetupHUDSlots: {ex.Message}");
+            }
+        }
+
+        public static bool HasCachedDataManager()
+        {
+            return cachedDataManager != null;
+        }
+
+        public static void CacheDataManager(object dataManager)
+        {
+            if (dataManager == null) return;
+
+            cachedDataManager = dataManager;
+            MelonLogger.Msg($"CacheDataManager called with: {dataManager.GetType().Name}");
+
+            try
+            {
+                var dmType = dataManager.GetType();
+
+                // List available methods for debugging
+                var methods = dmType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                    .Where(m => m.Name.Contains("Weapon") || m.Name.Contains("PowerUp") || m.Name.Contains("Item"))
+                    .Take(10);
+                foreach (var m in methods)
+                {
+                    MelonLogger.Msg($"  DataManager method: {m.Name}");
+                }
+
+                var getWeaponsMethod = dmType.GetMethod("GetConvertedWeapons");
+                var getPowerUpsMethod = dmType.GetMethod("GetConvertedPowerUpData");
+
+                MelonLogger.Msg($"GetConvertedWeapons: {(getWeaponsMethod != null ? "found" : "NOT FOUND")}");
+                MelonLogger.Msg($"GetConvertedPowerUpData: {(getPowerUpsMethod != null ? "found" : "NOT FOUND")}");
+
+                if (getWeaponsMethod != null)
+                {
+                    cachedWeaponsDict = getWeaponsMethod.Invoke(dataManager, null);
+                    MelonLogger.Msg($"cachedWeaponsDict: {(cachedWeaponsDict != null ? cachedWeaponsDict.GetType().Name : "null")}");
+                }
+
+                if (getPowerUpsMethod != null)
+                {
+                    cachedPowerUpsDict = getPowerUpsMethod.Invoke(dataManager, null);
+                    MelonLogger.Msg($"cachedPowerUpsDict: {(cachedPowerUpsDict != null ? cachedPowerUpsDict.GetType().Name : "null")}");
+                }
+
+                // Rebuild lookup tables with new data
+                lookupTablesBuilt = false;
+                BuildLookupTables();
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Error($"Error caching data manager: {ex}");
+            }
+        }
+
+        #endregion
+
+        #region Popup System
+
+        public static void ShowItemPopup(UnityEngine.Transform anchor, WeaponType? weaponType, ItemType? itemType)
+        {
+            MelonLogger.Msg($"[ShowItemPopup] Called with weapon={weaponType}, item={itemType}");
+
+            // Only show popups when game is paused
+            if (!IsGamePaused())
+            {
+                HideAllPopups();
+                return;
+            }
+
+            int anchorId = anchor?.GetInstanceID() ?? 0;
+
+            // Check if this anchor already has a popup in the stack
+            for (int i = 0; i < popupAnchorIds.Count; i++)
+            {
+                if (popupAnchorIds[i] == anchorId)
+                {
+                    // Already showing this popup, don't recreate
+                    return;
+                }
+            }
+
+            // Check if anchor is inside an existing popup (for recursive popups)
+            int parentPopupIndex = -1;
+            for (int i = 0; i < popupStack.Count; i++)
+            {
+                if (popupStack[i] != null && anchor != null && anchor.IsChildOf(popupStack[i].transform))
+                {
+                    parentPopupIndex = i;
+                    // Don't break - we want the deepest (highest index) parent
+                }
+            }
+
+            if (parentPopupIndex >= 0)
+            {
+                // Opening a child popup - close any existing children of this parent (one child per parent)
+                while (popupStack.Count > parentPopupIndex + 1)
+                {
+                    HideTopPopup();
+                }
+            }
+            else if (popupStack.Count > 0)
+            {
+                // Not from inside a popup, close all existing popups first
+                HideAllPopups();
+            }
+
+            // Find appropriate parent for popup (walk up to find a known view)
+            var popupParent = FindPopupParent(anchor);
+            if (popupParent == null) return;
+
+            // Create popup
+            var newPopup = CreatePopup(popupParent, weaponType, itemType);
+            if (newPopup == null) return;
+
+            // Add to stack
+            popupStack.Add(newPopup);
+            popupAnchorIds.Add(anchorId);
+
+            // Position near anchor
+            PositionPopup(newPopup, anchor);
+
+            // Add hover tracking to popup itself
+            AddPopupHoverTracking(newPopup);
+        }
+
+        private static UnityEngine.GameObject CreatePopup(UnityEngine.Transform parent, WeaponType? weaponType, ItemType? itemType)
+        {
+            var popup = new UnityEngine.GameObject("ItemTooltipPopup");
+            popup.transform.SetParent(parent, false);
+
+            var rect = popup.AddComponent<UnityEngine.RectTransform>();
+            rect.anchorMin = new UnityEngine.Vector2(0.5f, 0.5f);
+            rect.anchorMax = new UnityEngine.Vector2(0.5f, 0.5f);
+            rect.pivot = new UnityEngine.Vector2(0f, 1f);
+
+            // Background
+            var bg = popup.AddComponent<UnityEngine.UI.Image>();
+            bg.color = PopupBgColor;
+            bg.raycastTarget = true;
+
+            // Add outline
+            var outline = popup.AddComponent<UnityEngine.UI.Outline>();
+            outline.effectColor = PopupBorderColor;
+            outline.effectDistance = new UnityEngine.Vector2(2f, 2f);
+
+            // Content - we'll build this dynamically
+            float yOffset = -Padding;
+            float maxWidth = 420f;
+
+            // Get item data
+            string itemName = "Unknown";
+            string description = "";
+            UnityEngine.Sprite itemSprite = null;
+
+            if (weaponType.HasValue && cachedWeaponsDict != null)
+            {
+                var data = GetWeaponData(weaponType.Value);
+                if (data != null)
+                {
+                    itemName = data.name ?? weaponType.Value.ToString();
+                    description = data.description ?? "";
+                    itemSprite = GetSpriteForWeapon(weaponType.Value);
+                }
+            }
+            else if (itemType.HasValue && cachedPowerUpsDict != null)
+            {
+                var data = GetPowerUpData(itemType.Value);
+                if (data != null)
+                {
+                    itemName = GetPropertyValue<string>(data, "name") ?? itemType.Value.ToString();
+                    description = GetPropertyValue<string>(data, "description") ?? "";
+                    itemSprite = GetSpriteForItem(itemType.Value);
+                }
+            }
+
+            var font = GetFont();
+
+            // Title row: [Icon] Name
+            if (font != null)
+            {
+                var titleRow = new UnityEngine.GameObject("TitleRow");
+                titleRow.transform.SetParent(popup.transform, false);
+                var titleRect = titleRow.AddComponent<UnityEngine.RectTransform>();
+                titleRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                titleRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+                titleRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                titleRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+                titleRect.sizeDelta = new UnityEngine.Vector2(maxWidth - Padding * 2, IconSize);
+
+                // Title text
+                var titleText = new UnityEngine.GameObject("Title");
+                titleText.transform.SetParent(titleRow.transform, false);
+                var titleTextRect = titleText.AddComponent<UnityEngine.RectTransform>();
+                titleTextRect.anchorMin = UnityEngine.Vector2.zero;
+                titleTextRect.anchorMax = UnityEngine.Vector2.one;
+                titleTextRect.offsetMin = new UnityEngine.Vector2(IconSize + Spacing, 0f);
+                titleTextRect.offsetMax = UnityEngine.Vector2.zero;
+
+                var titleTmp = titleText.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                titleTmp.font = font;
+                titleTmp.text = itemName;
+                titleTmp.fontSize = 20f;
+                titleTmp.fontStyle = Il2CppTMPro.FontStyles.Bold;
+                titleTmp.color = UnityEngine.Color.white;
+                titleTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+
+                // Add item icon to the left of the title
+                if (itemSprite != null)
+                {
+                    var iconObj = new UnityEngine.GameObject("HeaderIcon");
+                    iconObj.transform.SetParent(titleRow.transform, false);
+                    var iconRect = iconObj.AddComponent<UnityEngine.RectTransform>();
+                    iconRect.anchorMin = new UnityEngine.Vector2(0f, 0.5f);
+                    iconRect.anchorMax = new UnityEngine.Vector2(0f, 0.5f);
+                    iconRect.pivot = new UnityEngine.Vector2(0f, 0.5f);
+                    iconRect.anchoredPosition = new UnityEngine.Vector2(0f, 0f);
+                    iconRect.sizeDelta = new UnityEngine.Vector2(IconSize, IconSize);
+
+                    var iconImage = iconObj.AddComponent<UnityEngine.UI.Image>();
+                    iconImage.sprite = itemSprite;
+                    iconImage.preserveAspect = true;
+                    iconImage.raycastTarget = false;
+                }
+
+                yOffset -= IconSize + Spacing;
+
+                // Description
+                if (!string.IsNullOrEmpty(description))
+                {
+                    var descObj = new UnityEngine.GameObject("Description");
+                    descObj.transform.SetParent(popup.transform, false);
+                    var descRect = descObj.AddComponent<UnityEngine.RectTransform>();
+                    descRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                    descRect.anchorMax = new UnityEngine.Vector2(0f, 1f);  // Don't stretch horizontally
+                    descRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                    descRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+                    float descWidth = maxWidth - Padding * 2;
+                    descRect.sizeDelta = new UnityEngine.Vector2(descWidth, 0f);
+
+                    var descTmp = descObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                    descTmp.font = font;
+                    descTmp.text = description;
+                    descTmp.fontSize = 14f;
+                    descTmp.color = new UnityEngine.Color(0.85f, 0.85f, 0.9f, 1f);
+                    descTmp.alignment = Il2CppTMPro.TextAlignmentOptions.TopLeft;
+                    descTmp.enableWordWrapping = true;
+                    descTmp.overflowMode = Il2CppTMPro.TextOverflowModes.Truncate;
+                    descTmp.rectTransform.sizeDelta = new UnityEngine.Vector2(descWidth, 0f);
+
+                    var descFitter = descObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
+                    descFitter.horizontalFit = UnityEngine.UI.ContentSizeFitter.FitMode.Unconstrained;
+                    descFitter.verticalFit = UnityEngine.UI.ContentSizeFitter.FitMode.PreferredSize;
+
+                    // Force TMP to recalculate with the constrained width
+                    descTmp.ForceMeshUpdate();
+                    UnityEngine.UI.LayoutRebuilder.ForceRebuildLayoutImmediate(descRect);
+
+                    float descHeight = descTmp.preferredHeight > 0 ? descTmp.preferredHeight : 40f;
+                    descRect.sizeDelta = new UnityEngine.Vector2(descWidth, descHeight);
+                    yOffset -= descHeight + Spacing;
+                }
+
+                // Evolution paths section
+                if (weaponType.HasValue)
+                {
+                    yOffset = AddWeaponEvolutionSection(popup.transform, font, weaponType.Value, yOffset, maxWidth);
+                }
+                else if (itemType.HasValue)
+                {
+                    yOffset = AddItemEvolutionSection(popup.transform, font, itemType.Value, yOffset, maxWidth);
+                }
+
+                // TODO: Add arcana section
+            }
+
+            // Set final size
+            yOffset -= Padding;
+            rect.sizeDelta = new UnityEngine.Vector2(maxWidth, -yOffset);
+
+            return popup;
+        }
+
+        // Structure to hold evolution formula data
+        private struct EvolutionFormula
+        {
+            public WeaponType BaseWeapon;
+            public WeaponType? RequiredPassive; // As WeaponType for enum compatibility
+            public ItemType? RequiredPassiveItem;
+            public WeaponType EvolvedWeapon;
+            public string BaseName;
+            public string PassiveName;
+            public string EvolvedName;
+            public UnityEngine.Sprite BaseSprite;
+            public UnityEngine.Sprite PassiveSprite;
+            public UnityEngine.Sprite EvolvedSprite;
+        }
+
+        // Check if player owns a weapon
+        private static bool PlayerOwnsWeapon(WeaponType weaponType)
+        {
+            if (cachedGameSession == null)
+            {
+                MelonLogger.Msg($"[PlayerOwnsWeapon] cachedGameSession is null, can't check {weaponType}");
+                return false;
+            }
+
+            try
+            {
+                var activeCharProp = cachedGameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                if (activeCharProp == null) return false;
+
+                var activeChar = activeCharProp.GetValue(cachedGameSession);
+                if (activeChar == null) return false;
+
+                var weaponsManagerProp = activeChar.GetType().GetProperty("WeaponsManager", BindingFlags.Public | BindingFlags.Instance);
+                if (weaponsManagerProp == null) return false;
+
+                var weaponsManager = weaponsManagerProp.GetValue(activeChar);
+                if (weaponsManager == null) return false;
+
+                var activeEquipProp = weaponsManager.GetType().GetProperty("ActiveEquipment", BindingFlags.Public | BindingFlags.Instance);
+                if (activeEquipProp == null) return false;
+
+                var equipment = activeEquipProp.GetValue(weaponsManager);
+                if (equipment == null) return false;
+
+                // Iterate through equipment list
+                var countProp = equipment.GetType().GetProperty("Count");
+                var indexer = equipment.GetType().GetProperty("Item");
+                if (countProp == null || indexer == null) return false;
+
+                int count = (int)countProp.GetValue(equipment);
+                string searchStr = weaponType.ToString();
+
+                for (int i = 0; i < count; i++)
+                {
+                    var item = indexer.GetValue(equipment, new object[] { i });
+                    if (item == null) continue;
+
+                    var typeProp = item.GetType().GetProperty("Type", BindingFlags.Public | BindingFlags.Instance);
+                    if (typeProp != null)
+                    {
+                        var itemType = typeProp.GetValue(item);
+                        if (itemType != null)
+                        {
+                            string itemTypeStr = itemType.ToString();
+                            if (itemTypeStr == searchStr)
+                            {
+                                MelonLogger.Msg($"[PlayerOwnsWeapon] Player OWNS {weaponType}");
+                                return true;
+                            }
+                        }
+                    }
+                }
+
+                MelonLogger.Msg($"[PlayerOwnsWeapon] Player does NOT own {weaponType} (checked {count} weapons)");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[PlayerOwnsWeapon] Error checking {weaponType}: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        // Check if player owns a passive item
+        private static bool PlayerOwnsItem(ItemType itemType)
+        {
+            if (cachedGameSession == null) return false;
+
+            try
+            {
+                var activeCharProp = cachedGameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                if (activeCharProp == null) return false;
+
+                var activeChar = activeCharProp.GetValue(cachedGameSession);
+                if (activeChar == null) return false;
+
+                var accessoriesManagerProp = activeChar.GetType().GetProperty("AccessoriesManager", BindingFlags.Public | BindingFlags.Instance);
+                if (accessoriesManagerProp == null) return false;
+
+                var accessoriesManager = accessoriesManagerProp.GetValue(activeChar);
+                if (accessoriesManager == null) return false;
+
+                var activeEquipProp = accessoriesManager.GetType().GetProperty("ActiveEquipment", BindingFlags.Public | BindingFlags.Instance);
+                if (activeEquipProp == null) return false;
+
+                var equipment = activeEquipProp.GetValue(accessoriesManager);
+                if (equipment == null) return false;
+
+                // Iterate through equipment list
+                var countProp = equipment.GetType().GetProperty("Count");
+                var indexer = equipment.GetType().GetProperty("Item");
+                if (countProp == null || indexer == null) return false;
+
+                int count = (int)countProp.GetValue(equipment);
+                for (int i = 0; i < count; i++)
+                {
+                    var item = indexer.GetValue(equipment, new object[] { i });
+                    if (item == null) continue;
+
+                    var typeProp = item.GetType().GetProperty("Type", BindingFlags.Public | BindingFlags.Instance);
+                    if (typeProp != null)
+                    {
+                        var equipType = typeProp.GetValue(item);
+                        if (equipType != null && equipType.ToString() == itemType.ToString())
+                            return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        // Create an icon with optional yellow circle background for owned items
+        private static UnityEngine.GameObject CreateFormulaIcon(UnityEngine.Transform parent, string name,
+            UnityEngine.Sprite sprite, bool isOwned, float size, float x, float y)
+        {
+            var container = new UnityEngine.GameObject(name);
+            container.transform.SetParent(parent, false);
+            var containerRect = container.AddComponent<UnityEngine.RectTransform>();
+            containerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+            containerRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+            containerRect.pivot = new UnityEngine.Vector2(0f, 1f);
+            containerRect.anchoredPosition = new UnityEngine.Vector2(x, y);
+            containerRect.sizeDelta = new UnityEngine.Vector2(size, size);
+
+            // Add transparent image for raycast detection (needed for hover)
+            var containerImage = container.AddComponent<UnityEngine.UI.Image>();
+            containerImage.color = new UnityEngine.Color(0f, 0f, 0f, 0f); // Fully transparent
+            containerImage.raycastTarget = true;
+
+            // Yellow circle background for owned items
+            if (isOwned)
+            {
+                var bgObj = new UnityEngine.GameObject("OwnedBg");
+                bgObj.transform.SetParent(container.transform, false);
+                var bgImage = bgObj.AddComponent<UnityEngine.UI.Image>();
+                bgImage.sprite = GetCircleSprite();
+                bgImage.color = new UnityEngine.Color(1f, 0.85f, 0f, 0.7f); // Golden yellow
+                bgImage.raycastTarget = false;
+                var bgRect = bgObj.GetComponent<UnityEngine.RectTransform>();
+                bgRect.anchorMin = UnityEngine.Vector2.zero;
+                bgRect.anchorMax = UnityEngine.Vector2.one;
+                bgRect.offsetMin = new UnityEngine.Vector2(-4f, -4f);
+                bgRect.offsetMax = new UnityEngine.Vector2(4f, 4f);
+            }
+
+            // Icon sprite
+            if (sprite != null)
+            {
+                var iconObj = new UnityEngine.GameObject("Icon");
+                iconObj.transform.SetParent(container.transform, false);
+                var iconImage = iconObj.AddComponent<UnityEngine.UI.Image>();
+                iconImage.sprite = sprite;
+                iconImage.preserveAspect = true;
+                iconImage.raycastTarget = false;
+                var iconRect = iconObj.GetComponent<UnityEngine.RectTransform>();
+                iconRect.anchorMin = UnityEngine.Vector2.zero;
+                iconRect.anchorMax = UnityEngine.Vector2.one;
+                iconRect.offsetMin = UnityEngine.Vector2.zero;
+                iconRect.offsetMax = UnityEngine.Vector2.zero;
+            }
+
+            return container;
+        }
+
+        /// <summary>
+        /// Counts how many weapons use this type as a passive requirement in their evoSynergy.
+        /// </summary>
+        private static int CountPassiveUses(WeaponType passiveType)
+        {
+            if (cachedWeaponsDict == null) return 0;
+
+            int count = 0;
+            string passiveTypeStr = passiveType.ToString();
+
+            try
+            {
+                var keysProperty = cachedWeaponsDict.GetType().GetProperty("Keys");
+                if (keysProperty == null) return 0;
+
+                var keys = keysProperty.GetValue(cachedWeaponsDict);
+                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
+                var moveNext = enumerator.GetType().GetMethod("MoveNext");
+                var current = enumerator.GetType().GetProperty("Current");
+
+                while ((bool)moveNext.Invoke(enumerator, null))
+                {
+                    var weaponType = (WeaponType)current.GetValue(enumerator);
+                    if (weaponType == passiveType) continue; // Skip self
+
+                    var weaponDataList = GetWeaponDataList(weaponType);
+                    if (weaponDataList == null) continue;
+
+                    for (int i = 0; i < weaponDataList.Count; i++)
+                    {
+                        var weaponData = weaponDataList[i];
+                        if (weaponData == null) continue;
+
+                        try
+                        {
+                            var synergyProp = weaponData.GetType().GetProperty("evoSynergy");
+                            if (synergyProp == null) continue;
+
+                            var synergy = synergyProp.GetValue(weaponData) as Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType>;
+                            if (synergy == null || synergy.Length == 0) continue;
+
+                            string evoInto = GetPropertyValue<string>(weaponData, "evoInto");
+                            if (string.IsNullOrEmpty(evoInto)) continue;
+
+                            for (int j = 0; j < synergy.Length; j++)
+                            {
+                                if (synergy[j].ToString() == passiveTypeStr)
+                                {
+                                    count++;
+                                    break; // Count each weapon only once
+                                }
+                            }
+                        }
+                        catch { }
+
+                        break; // Only check first level of each weapon
+                    }
+                }
+            }
+            catch { }
+
+            return count;
+        }
+
+        private static float AddWeaponEvolutionSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, WeaponType weaponType, float yOffset, float maxWidth)
+        {
+            var data = GetWeaponData(weaponType);
+            if (data == null) return yOffset;
+
+            // Check if this weapon has evolution info
+            string evoInto = null;
+            Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType> evoSynergy = null;
+
+            try
+            {
+                evoInto = GetPropertyValue<string>(data, "evoInto");
+                var synergyProp = data.GetType().GetProperty("evoSynergy");
+                if (synergyProp != null)
+                {
+                    evoSynergy = synergyProp.GetValue(data) as Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType>;
+                }
+            }
+            catch { }
+
+            bool hasOwnEvolution = !string.IsNullOrEmpty(evoInto);
+
+            MelonLogger.Msg($"[AddWeaponEvo] {weaponType}: evoInto='{evoInto ?? "null"}', hasOwnEvolution={hasOwnEvolution}");
+
+            // Check if this item is used as a passive requirement by OTHER weapons
+            // This handles items like Empty Tome, Spinach, etc. that enable multiple evolutions
+            // We do this REGARDLESS of whether the item has its own evoInto
+            int passiveUseCount = CountPassiveUses(weaponType);
+            MelonLogger.Msg($"[AddWeaponEvo] {weaponType}: used as passive by {passiveUseCount} other weapons");
+
+            if (passiveUseCount > 0)
+            {
+                // This is a passive item - show all evolutions it enables
+                return AddPassiveEvolutionSection(parent, font, weaponType, yOffset, maxWidth);
+            }
+
+            // If this weapon doesn't evolve itself and isn't used as a passive, nothing to show
+            if (!hasOwnEvolution)
+            {
+                return yOffset;
+            }
+
+            // Parse evolution data
+            WeaponType? evoType = null;
+            UnityEngine.Sprite evoSprite = null;
+            if (System.Enum.TryParse<WeaponType>(evoInto, out var parsed))
+            {
+                evoType = parsed;
+                evoSprite = GetSpriteForWeapon(parsed);
+            }
+
+            // Get this weapon's sprite and ownership
+            var weaponSprite = GetSpriteForWeapon(weaponType);
+            bool ownsWeapon = PlayerOwnsWeapon(weaponType);
+
+            // Get passive requirement info
+            UnityEngine.Sprite passiveSprite = null;
+            bool ownsPassive = false;
+            ItemType? passiveItemType = null;
+            WeaponType? passiveWeaponType = null;
+
+            if (evoSynergy != null && evoSynergy.Length > 0)
+            {
+                var reqType = evoSynergy[0];
+
+                // Try as weapon first
+                var reqData = GetWeaponData(reqType);
+                if (reqData != null)
+                {
+                    passiveWeaponType = reqType;
+                    passiveSprite = GetSpriteForWeapon(reqType);
+                    ownsPassive = PlayerOwnsWeapon(reqType);
+                }
+                else
+                {
+                    // Try as item
+                    int enumValue = (int)reqType;
+                    if (System.Enum.IsDefined(typeof(ItemType), enumValue))
+                    {
+                        var itemType = (ItemType)enumValue;
+                        passiveItemType = itemType;
+                        passiveSprite = GetSpriteForItem(itemType);
+                        ownsPassive = PlayerOwnsItem(itemType);
+                    }
+                }
+            }
+
+            // Add section header
+            yOffset -= Spacing;
+            var headerObj = CreateTextElement(parent, "EvoHeader", "Evolutions:", font, 14f,
+                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
+            var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
+            headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+            headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+            headerRect.pivot = new UnityEngine.Vector2(0f, 1f);
+            headerRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+            headerRect.sizeDelta = new UnityEngine.Vector2(maxWidth - Padding * 2, 20f);
+            yOffset -= 22f;
+
+            // Create simplified formula row: + [Passive] → [Evolved]
+            // The base weapon is already shown in the header
+            float iconSize = 38f;
+            float rowHeight = iconSize + 8f;
+            float xOffset = Padding + 5f;
+
+            // Plus sign
+            var plusObj = CreateTextElement(parent, "Plus", "+", font, 18f,
+                new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
+            var plusRect = plusObj.GetComponent<UnityEngine.RectTransform>();
+            plusRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+            plusRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+            plusRect.pivot = new UnityEngine.Vector2(0f, 1f);
+            plusRect.anchoredPosition = new UnityEngine.Vector2(xOffset, yOffset - 8f);
+            plusRect.sizeDelta = new UnityEngine.Vector2(20f, iconSize);
+            xOffset += 22f;
+
+            // Passive icon (with ownership highlight)
+            var passiveIcon = CreateFormulaIcon(parent, "PassiveIcon", passiveSprite, ownsPassive, iconSize, xOffset, yOffset);
+            if (passiveWeaponType.HasValue)
+                AddHoverToGameObject(passiveIcon, passiveWeaponType.Value, null);
+            else if (passiveItemType.HasValue)
+                AddHoverToGameObject(passiveIcon, null, passiveItemType.Value);
+            xOffset += iconSize + 4f;
+
+            // Arrow
+            var arrowObj = CreateTextElement(parent, "Arrow", "→", font, 18f,
+                new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Normal);
+            var arrowRect = arrowObj.GetComponent<UnityEngine.RectTransform>();
+            arrowRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+            arrowRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+            arrowRect.pivot = new UnityEngine.Vector2(0f, 1f);
+            arrowRect.anchoredPosition = new UnityEngine.Vector2(xOffset, yOffset - 8f);
+            arrowRect.sizeDelta = new UnityEngine.Vector2(24f, iconSize);
+            xOffset += 26f;
+
+            // Evolved weapon icon (no highlight - only ingredients get highlighted)
+            var evoIcon = CreateFormulaIcon(parent, "EvoIcon", evoSprite, false, iconSize, xOffset, yOffset);
+            if (evoType.HasValue)
+                AddHoverToGameObject(evoIcon, evoType.Value, null);
+
+            yOffset -= rowHeight;
+
+            return yOffset;
+        }
+
+        /// <summary>
+        /// Shows evolutions for passive items (items that don't evolve themselves but enable other weapons to evolve).
+        /// This handles WeaponType values like DURATION (Spellbinder), MAGNET (Attractorb), etc.
+        /// </summary>
+        private static float AddPassiveEvolutionSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, WeaponType passiveType, float yOffset, float maxWidth)
+        {
+            if (cachedWeaponsDict == null) return yOffset;
+
+            MelonLogger.Msg($"[AddPassiveEvo] Finding evolutions enabled by {passiveType}");
+
+            var formulas = new System.Collections.Generic.List<EvolutionFormula>();
+            string passiveTypeStr = passiveType.ToString();
+
+            try
+            {
+                var keysProperty = cachedWeaponsDict.GetType().GetProperty("Keys");
+                if (keysProperty == null) return yOffset;
+
+                var keys = keysProperty.GetValue(cachedWeaponsDict);
+                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
+                var moveNext = enumerator.GetType().GetMethod("MoveNext");
+                var current = enumerator.GetType().GetProperty("Current");
+
+                while ((bool)moveNext.Invoke(enumerator, null))
+                {
+                    var weaponType = (WeaponType)current.GetValue(enumerator);
+                    var weaponDataList = GetWeaponDataList(weaponType);
+                    if (weaponDataList == null) continue;
+
+                    for (int i = 0; i < weaponDataList.Count; i++)
+                    {
+                        var weaponData = weaponDataList[i];
+                        if (weaponData == null) continue;
+
+                        try
+                        {
+                            var synergyProp = weaponData.GetType().GetProperty("evoSynergy");
+                            if (synergyProp == null) continue;
+
+                            var synergy = synergyProp.GetValue(weaponData) as Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType>;
+                            if (synergy == null || synergy.Length == 0) continue;
+
+                            string evoInto = GetPropertyValue<string>(weaponData, "evoInto");
+                            if (string.IsNullOrEmpty(evoInto)) continue;
+
+                            // Check if this passive type is in the synergy list
+                            bool found = false;
+                            for (int j = 0; j < synergy.Length; j++)
+                            {
+                                if (synergy[j].ToString() == passiveTypeStr)
+                                {
+                                    found = true;
+                                    break;
+                                }
+                            }
+
+                            if (found)
+                            {
+                                if (System.Enum.TryParse<WeaponType>(evoInto, out var evoType))
+                                {
+                                    MelonLogger.Msg($"[AddPassiveEvo] Found: {weaponType} + {passiveType} = {evoType}");
+
+                                    var formula = new EvolutionFormula
+                                    {
+                                        BaseWeapon = weaponType,
+                                        RequiredPassive = passiveType,
+                                        EvolvedWeapon = evoType,
+                                        BaseName = GetPropertyValue<string>(weaponData, "name") ?? weaponType.ToString(),
+                                        BaseSprite = GetSpriteForWeapon(weaponType),
+                                        PassiveSprite = GetSpriteForWeapon(passiveType),
+                                        EvolvedSprite = GetSpriteForWeapon(evoType)
+                                    };
+
+                                    var evoData = GetWeaponData(evoType);
+                                    if (evoData != null)
+                                        formula.EvolvedName = GetPropertyValue<string>(evoData, "name") ?? evoInto;
+                                    else
+                                        formula.EvolvedName = evoInto;
+
+                                    // Avoid duplicates
+                                    bool isDupe = false;
+                                    foreach (var f in formulas)
+                                    {
+                                        if (f.BaseWeapon == formula.BaseWeapon && f.EvolvedWeapon == formula.EvolvedWeapon)
+                                        {
+                                            isDupe = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!isDupe) formulas.Add(formula);
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[AddPassiveEvo] Error: {ex.Message}");
+            }
+
+            MelonLogger.Msg($"[AddPassiveEvo] {passiveType}: found {formulas.Count} unique formulas");
+
+            if (formulas.Count == 0) return yOffset;
+
+            // Check if player owns this passive
+            bool ownsPassive = PlayerOwnsWeapon(passiveType);
+
+            // Add section header
+            yOffset -= Spacing;
+            var headerObj = CreateTextElement(parent, "EvoHeader", "Evolutions:", font, 14f,
+                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
+            var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
+            headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+            headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+            headerRect.pivot = new UnityEngine.Vector2(0f, 1f);
+            headerRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+            headerRect.sizeDelta = new UnityEngine.Vector2(maxWidth - Padding * 2, 20f);
+            yOffset -= 22f;
+
+            // Create simplified formula grid: [Weapon] → [Evolved]
+            // The passive item is already shown in the header, so we don't repeat it
+            float iconSize = 40f;
+            float arrowWidth = 28f;
+            float pairSpacing = 20f;
+            float pairWidth = iconSize + arrowWidth + iconSize + pairSpacing;
+            float rowHeight = iconSize + 10f;
+
+            // Calculate how many pairs fit per row (max 3 for better readability)
+            float availableWidth = maxWidth - Padding * 2;
+            int pairsPerRow = (int)(availableWidth / pairWidth);
+            if (pairsPerRow < 1) pairsPerRow = 1;
+            if (pairsPerRow > 3) pairsPerRow = 3;
+
+            int formulaIndex = 0;
+            int col = 0;
+            float rowStartY = yOffset;
+
+            foreach (var formula in formulas)
+            {
+                // Calculate position in grid
+                float xOffset = Padding + (col * pairWidth);
+
+                bool ownsWeapon = PlayerOwnsWeapon(formula.BaseWeapon);
+
+                // Base weapon icon (with yellow highlight if owned - it's an ingredient)
+                var weaponIcon = CreateFormulaIcon(parent, $"Weapon{formulaIndex}", formula.BaseSprite, ownsWeapon, iconSize, xOffset, yOffset);
+                AddHoverToGameObject(weaponIcon, formula.BaseWeapon, null);
+                xOffset += iconSize + 2f;
+
+                // Arrow (larger and more visible)
+                var arrowObj = CreateTextElement(parent, $"Arrow{formulaIndex}", "→", font, 20f,
+                    new UnityEngine.Color(0.9f, 0.9f, 0.5f, 1f), Il2CppTMPro.FontStyles.Bold);
+                var arrowRect = arrowObj.GetComponent<UnityEngine.RectTransform>();
+                arrowRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                arrowRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                arrowRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                arrowRect.anchoredPosition = new UnityEngine.Vector2(xOffset, yOffset - 8f);
+                arrowRect.sizeDelta = new UnityEngine.Vector2(arrowWidth, iconSize);
+                xOffset += arrowWidth;
+
+                // Evolved weapon icon (no highlight - only ingredients get highlighted)
+                var evoIcon = CreateFormulaIcon(parent, $"Evo{formulaIndex}", formula.EvolvedSprite, false, iconSize, xOffset, yOffset);
+                AddHoverToGameObject(evoIcon, formula.EvolvedWeapon, null);
+
+                formulaIndex++;
+                col++;
+
+                // Move to next row if needed
+                if (col >= pairsPerRow)
+                {
+                    col = 0;
+                    yOffset -= rowHeight;
+                }
+            }
+
+            // If we ended mid-row, account for that row
+            if (col > 0)
+            {
+                yOffset -= rowHeight;
+            }
+
+            return yOffset;
+        }
+
+        private static float AddItemEvolutionSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, ItemType itemType, float yOffset, float maxWidth)
+        {
+            // For items/powerups, find ALL weapons that use this item to evolve
+            if (cachedWeaponsDict == null)
+            {
+                MelonLogger.Msg($"[AddItemEvo] cachedWeaponsDict is null for {itemType}");
+                return yOffset;
+            }
+
+            MelonLogger.Msg($"[AddItemEvo] Finding evolutions for {itemType} (looking for synergy match: '{itemType.ToString()}')");
+
+            var formulas = new System.Collections.Generic.List<EvolutionFormula>();
+            int weaponsChecked = 0;
+            int matchesFound = 0;
+
+            try
+            {
+                var keysProperty = cachedWeaponsDict.GetType().GetProperty("Keys");
+                if (keysProperty == null) return yOffset;
+
+                var keys = keysProperty.GetValue(cachedWeaponsDict);
+                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
+                var moveNext = enumerator.GetType().GetMethod("MoveNext");
+                var current = enumerator.GetType().GetProperty("Current");
+
+                while ((bool)moveNext.Invoke(enumerator, null))
+                {
+                    weaponsChecked++;
+                    var weaponType = (WeaponType)current.GetValue(enumerator);
+                    var weaponDataList = GetWeaponDataList(weaponType);
+                    if (weaponDataList == null) continue;
+
+                    for (int i = 0; i < weaponDataList.Count; i++)
+                    {
+                        var weaponData = weaponDataList[i];
+                        if (weaponData == null) continue;
+
+                        try
+                        {
+                            var synergyProp = weaponData.GetType().GetProperty("evoSynergy");
+                            if (synergyProp == null) continue;
+
+                            var synergy = synergyProp.GetValue(weaponData) as Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType>;
+                            if (synergy == null || synergy.Length == 0) continue;
+
+                            // Log what this weapon's synergy contains
+                            string evoIntoCheck = GetPropertyValue<string>(weaponData, "evoInto");
+                            if (!string.IsNullOrEmpty(evoIntoCheck))
+                            {
+                                string synergyContents = "";
+                                for (int s = 0; s < synergy.Length; s++)
+                                {
+                                    synergyContents += synergy[s].ToString() + " ";
+                                }
+                                MelonLogger.Msg($"[AddItemEvo] {weaponType} evoSynergy: [{synergyContents}] -> {evoIntoCheck}");
+                            }
+
+                            // Check if this item type is in the synergy list
+                            string itemTypeStr = itemType.ToString();
+                            bool found = false;
+                            for (int j = 0; j < synergy.Length; j++)
+                            {
+                                if (synergy[j].ToString() == itemTypeStr)
+                                {
+                                    found = true;
+                                    break;
+                                }
+                            }
+
+                            if (found)
+                            {
+                                matchesFound++;
+                                string evoInto = GetPropertyValue<string>(weaponData, "evoInto");
+                                if (string.IsNullOrEmpty(evoInto)) continue;
+
+                                if (System.Enum.TryParse<WeaponType>(evoInto, out var evoType))
+                                {
+                                    MelonLogger.Msg($"[AddItemEvo] Found: {weaponType} + {itemType} = {evoType}");
+
+                                    var formula = new EvolutionFormula
+                                    {
+                                        BaseWeapon = weaponType,
+                                        RequiredPassiveItem = itemType,
+                                        EvolvedWeapon = evoType,
+                                        BaseName = GetPropertyValue<string>(weaponData, "name") ?? weaponType.ToString(),
+                                        BaseSprite = GetSpriteForWeapon(weaponType),
+                                        PassiveSprite = GetSpriteForItem(itemType),
+                                        EvolvedSprite = GetSpriteForWeapon(evoType)
+                                    };
+
+                                    var evoData = GetWeaponData(evoType);
+                                    if (evoData != null)
+                                        formula.EvolvedName = GetPropertyValue<string>(evoData, "name") ?? evoInto;
+                                    else
+                                        formula.EvolvedName = evoInto;
+
+                                    // Avoid duplicates
+                                    bool isDupe = false;
+                                    foreach (var f in formulas)
+                                    {
+                                        if (f.BaseWeapon == formula.BaseWeapon && f.EvolvedWeapon == formula.EvolvedWeapon)
+                                        {
+                                            isDupe = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!isDupe) formulas.Add(formula);
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[AddItemEvo] Error: {ex.Message}");
+            }
+
+            MelonLogger.Msg($"[AddItemEvo] {itemType}: checked {weaponsChecked} weapons, found {matchesFound} matches, {formulas.Count} unique formulas");
+
+            if (formulas.Count == 0) return yOffset;
+
+            // Check ownership of this item
+            bool ownsThisItem = PlayerOwnsItem(itemType);
+
+            // Add section header
+            yOffset -= Spacing;
+            var headerObj = CreateTextElement(parent, "EvoHeader", "Evolutions:", font, 14f,
+                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
+            var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
+            headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+            headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+            headerRect.pivot = new UnityEngine.Vector2(0f, 1f);
+            headerRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+            headerRect.sizeDelta = new UnityEngine.Vector2(maxWidth - Padding * 2, 20f);
+            yOffset -= 22f;
+
+            // Create formula rows: [Weapon] + [This Item] = [Evolved]
+            float iconSize = 36f;
+            float rowHeight = iconSize + 4f;
+            int formulaIndex = 0;
+
+            foreach (var formula in formulas)
+            {
+                float xOffset = Padding + 5f;
+                bool ownsWeapon = PlayerOwnsWeapon(formula.BaseWeapon);
+
+                // Base weapon icon
+                var weaponIcon = CreateFormulaIcon(parent, $"Weapon{formulaIndex}", formula.BaseSprite, ownsWeapon, iconSize, xOffset, yOffset);
+                AddHoverToGameObject(weaponIcon, formula.BaseWeapon, null);
+                xOffset += iconSize + 3f;
+
+                // Plus sign
+                var plusObj = CreateTextElement(parent, $"Plus{formulaIndex}", "+", font, 14f,
+                    new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
+                var plusRect = plusObj.GetComponent<UnityEngine.RectTransform>();
+                plusRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                plusRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                plusRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                plusRect.anchoredPosition = new UnityEngine.Vector2(xOffset, yOffset - 4f);
+                plusRect.sizeDelta = new UnityEngine.Vector2(14f, iconSize);
+                xOffset += 14f;
+
+                // This passive item icon (highlighted if owned)
+                var passiveIcon = CreateFormulaIcon(parent, $"Passive{formulaIndex}", formula.PassiveSprite, ownsThisItem, iconSize, xOffset, yOffset);
+                AddHoverToGameObject(passiveIcon, null, itemType);
+                xOffset += iconSize + 3f;
+
+                // Equals sign
+                var equalsObj = CreateTextElement(parent, $"Equals{formulaIndex}", "=", font, 14f,
+                    new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
+                var equalsRect = equalsObj.GetComponent<UnityEngine.RectTransform>();
+                equalsRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                equalsRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                equalsRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                equalsRect.anchoredPosition = new UnityEngine.Vector2(xOffset, yOffset - 4f);
+                equalsRect.sizeDelta = new UnityEngine.Vector2(14f, iconSize);
+                xOffset += 14f;
+
+                // Evolved weapon icon
+                var evoIcon = CreateFormulaIcon(parent, $"Evo{formulaIndex}", formula.EvolvedSprite, false, iconSize, xOffset, yOffset);
+                AddHoverToGameObject(evoIcon, formula.EvolvedWeapon, null);
+                xOffset += iconSize + 6f;
+
+                // Evolution name
+                var nameObj = CreateTextElement(parent, $"EvoName{formulaIndex}", formula.EvolvedName, font, 11f,
+                    new UnityEngine.Color(0.75f, 0.75f, 0.8f, 1f), Il2CppTMPro.FontStyles.Normal);
+                var nameRect = nameObj.GetComponent<UnityEngine.RectTransform>();
+                nameRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                nameRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+                nameRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                nameRect.anchoredPosition = new UnityEngine.Vector2(xOffset, yOffset - 5f);
+                nameRect.sizeDelta = new UnityEngine.Vector2(maxWidth - xOffset - Padding, 16f);
+
+                yOffset -= rowHeight;
+                formulaIndex++;
+            }
+
+            return yOffset;
+        }
+
+        private static UnityEngine.GameObject CreateTextElement(UnityEngine.Transform parent, string name, string text,
+            Il2CppTMPro.TMP_FontAsset font, float fontSize, UnityEngine.Color color, Il2CppTMPro.FontStyles style)
+        {
+            var obj = new UnityEngine.GameObject(name);
+            obj.transform.SetParent(parent, false);
+            obj.AddComponent<UnityEngine.RectTransform>();
+
+            var tmp = obj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+            tmp.font = font;
+            tmp.text = text;
+            tmp.fontSize = fontSize;
+            tmp.color = color;
+            tmp.fontStyle = style;
+            tmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+
+            return obj;
+        }
+
+        private static Il2CppSystem.Collections.Generic.List<WeaponData> GetWeaponDataList(WeaponType type)
+        {
+            if (cachedWeaponsDict == null) return null;
+            try
+            {
+                var indexer = cachedWeaponsDict.GetType().GetProperty("Item");
+                if (indexer != null)
+                {
+                    return indexer.GetValue(cachedWeaponsDict, new object[] { type }) as Il2CppSystem.Collections.Generic.List<WeaponData>;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void PositionPopup(UnityEngine.GameObject popup, UnityEngine.Transform anchor)
+        {
+            var popupRect = popup.GetComponent<UnityEngine.RectTransform>();
+            if (popupRect == null) return;
+
+            var popupParent = popup.transform.parent;
+            if (popupParent == null) return;
+
+            // Position relative to anchor, but offset so the popup appears
+            // with the mouse cursor inside it (near top-left of popup)
+            var localPos = popupParent.InverseTransformPoint(anchor.position);
+
+            // Convert from pivot-relative (InverseTransformPoint) to anchor-relative (anchoredPosition)
+            // This accounts for parents whose pivot isn't at center
+            var parentRect = popupParent.GetComponent<UnityEngine.RectTransform>();
+            if (parentRect != null)
+            {
+                var anchorOffset = parentRect.rect.center;
+                localPos.x -= anchorOffset.x;
+                localPos.y -= anchorOffset.y;
+            }
+
+            // Initial position - offset so mouse ends up inside the popup
+            float posX = localPos.x - 15f;
+            float posY = localPos.y + 40f;
+
+            // Get popup size
+            float popupWidth = popupRect.sizeDelta.x;
+            float popupHeight = popupRect.sizeDelta.y;
+
+            // Clamp to parent bounds
+            if (parentRect != null)
+            {
+                float parentWidth = parentRect.rect.width;
+                float parentHeight = parentRect.rect.height;
+
+                // Clamp to keep popup within parent bounds
+                // Right edge
+                if (posX + popupWidth > parentWidth / 2)
+                {
+                    posX = parentWidth / 2 - popupWidth;
+                }
+                // Left edge
+                if (posX < -parentWidth / 2)
+                {
+                    posX = -parentWidth / 2;
+                }
+                // Top edge (remember Y is inverted in UI - popup grows downward)
+                if (posY > parentHeight / 2)
+                {
+                    posY = parentHeight / 2;
+                }
+                // Bottom edge
+                if (posY - popupHeight < -parentHeight / 2)
+                {
+                    posY = -parentHeight / 2 + popupHeight;
+                }
+
+                // Ensure mouse is still inside popup (adjust if clamping moved it too far)
+                // Keep at least 20px margin from edges where possible
+                float minX = posX + 20f;
+                float maxX = posX + popupWidth - 20f;
+                float minY = posY - popupHeight + 20f;
+                float maxY = posY - 20f;
+
+                // If anchor is outside the popup after clamping, adjust
+                if (localPos.x < minX || localPos.x > maxX || localPos.y < minY || localPos.y > maxY)
+                {
+                    // Try to keep mouse inside by shifting popup
+                    if (localPos.x < minX) posX = localPos.x - 20f;
+                    if (localPos.x > maxX) posX = localPos.x - popupWidth + 20f;
+                }
+            }
+
+            popupRect.anchoredPosition = new UnityEngine.Vector2(posX, posY);
+        }
+
+        /// <summary>
+        /// Finds an appropriate parent for the popup by walking up the hierarchy.
+        /// </summary>
+        private static UnityEngine.Transform FindPopupParent(UnityEngine.Transform anchor)
+        {
+            // Known parent names we want to attach popup to
+            string[] knownParents = new string[]
+            {
+                "View - Level Up",
+                "View - Merchant",
+                "View - Pause",
+                "View - Paused",
+                "View - ItemFound",
+                "View - Game",
+                "Safe Area"
+            };
+
+            var current = anchor;
+            while (current != null)
+            {
+                foreach (var name in knownParents)
+                {
+                    if (current.name == name)
+                        return current;
+                }
+                current = current.parent;
+            }
+
+            // Fallback to root
+            return anchor.root;
+        }
+
+        private static void AddPopupHoverTracking(UnityEngine.GameObject popup)
+        {
+            var eventTrigger = popup.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+
+            // Capture the index when this popup was created
+            int thisPopupIndex = popupStack.Count - 1;
+
+            var enterEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            enterEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter;
+            enterEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                mouseOverPopupIndex = thisPopupIndex;
+            }));
+            eventTrigger.triggers.Add(enterEntry);
+
+            var exitEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
+            exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                // If we're leaving this popup and not entering a child, mark as not over this popup
+                if (mouseOverPopupIndex == thisPopupIndex)
+                {
+                    mouseOverPopupIndex = -1;
+                }
+                // Start delayed hide check for this popup level
+                MelonLoader.MelonCoroutines.Start(DelayedStackHideCheck(thisPopupIndex));
+            }));
+            eventTrigger.triggers.Add(exitEntry);
+        }
+
+        public static void HidePopup()
+        {
+            HideAllPopups();
+        }
+
+        private static void HideAllPopups()
+        {
+            mouseOverPopupIndex = -1;
+            foreach (var popup in popupStack)
+            {
+                if (popup != null)
+                {
+                    UnityEngine.Object.Destroy(popup);
+                }
+            }
+            popupStack.Clear();
+            popupAnchorIds.Clear();
+        }
+
+        private static void HideTopPopup()
+        {
+            if (popupStack.Count > 0)
+            {
+                var topPopup = popupStack[popupStack.Count - 1];
+                if (topPopup != null)
+                {
+                    UnityEngine.Object.Destroy(topPopup);
+                }
+                popupStack.RemoveAt(popupStack.Count - 1);
+                popupAnchorIds.RemoveAt(popupAnchorIds.Count - 1);
+            }
+        }
+
+        /// <summary>
+        /// Called by SetWeaponData patch to register a UI element with its weapon type.
+        /// </summary>
+        public static void RegisterWeaponUI(int instanceId, UnityEngine.GameObject go, WeaponType type, bool isAddMethod = false)
+        {
+            uiToWeaponType[instanceId] = type;
+
+            UnityEngine.GameObject iconGo = null;
+
+            if (isAddMethod)
+            {
+                // For "Add" methods (like AddAffectedWeapon), the icon was just created as the last child
+                iconGo = FindLastImageChild(go);
+                if (iconGo != null)
+                {
+                    MelonLogger.Msg($"  Found last child icon: {iconGo.name}");
+                }
+            }
+            else
+            {
+                // Find the icon image within this UI element (usually named "Icon" or similar)
+                iconGo = FindIconInUI(go);
+            }
+
+            if (iconGo != null)
+            {
+                AddHoverToGameObject(iconGo, type, null);
+                MelonLogger.Msg($"Registered weapon UI icon: {type}");
+            }
+            else
+            {
+                // Fallback to whole card if icon not found
+                AddHoverToGameObject(go, type, null);
+                MelonLogger.Msg($"Registered weapon UI (whole card): {type}");
+            }
+        }
+
+        private static UnityEngine.GameObject FindLastImageChild(UnityEngine.GameObject parent)
+        {
+            // Find the last child that has an Image component (most recently added icon)
+            // Search recursively since icons might be nested (e.g., under "Info Panel")
+            return FindLastImageChildRecursive(parent.transform, 0);
+        }
+
+        private static UnityEngine.GameObject FindLastImageChildRecursive(UnityEngine.Transform parent, int depth)
+        {
+            if (depth > 3) return null; // Don't go too deep
+
+            // Search children from last to first
+            for (int i = parent.childCount - 1; i >= 0; i--)
+            {
+                var child = parent.GetChild(i);
+                string lowerName = child.name.ToLower();
+
+                // Skip certain containers but search inside them
+                bool isContainer = lowerName.Contains("panel") || lowerName.Contains("container") || lowerName.Contains("group");
+
+                if (isContainer)
+                {
+                    // Search inside this container
+                    var found = FindLastImageChildRecursive(child, depth + 1);
+                    if (found != null) return found;
+                    continue;
+                }
+
+                // Skip backgrounds/frames
+                if (lowerName.Contains("background") || lowerName.Contains("frame"))
+                    continue;
+
+                // Check if this has an Image with a sprite
+                var img = child.GetComponent<UnityEngine.UI.Image>();
+                if (img != null && img.sprite != null)
+                {
+                    MelonLogger.Msg($"  Found icon: {child.name} (depth {depth})");
+                    return child.gameObject;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Called by SetItemData patch to register a UI element with its item type.
+        /// </summary>
+        public static void RegisterItemUI(int instanceId, UnityEngine.GameObject go, ItemType type, bool isAddMethod = false)
+        {
+            uiToItemType[instanceId] = type;
+
+            UnityEngine.GameObject iconGo = null;
+
+            if (isAddMethod)
+            {
+                iconGo = FindLastImageChild(go);
+                if (iconGo != null)
+                {
+                    MelonLogger.Msg($"  Found last child icon: {iconGo.name}");
+                }
+            }
+            else
+            {
+                iconGo = FindIconInUI(go);
+            }
+
+            if (iconGo != null)
+            {
+                AddHoverToGameObject(iconGo, null, type);
+                MelonLogger.Msg($"Registered item UI icon: {type}");
+            }
+            else
+            {
+                AddHoverToGameObject(go, null, type);
+                MelonLogger.Msg($"Registered item UI (whole card): {type}");
+            }
+        }
+
+        /// <summary>
+        /// Finds the icon Image within a LevelUpItemUI.
+        /// </summary>
+        private static UnityEngine.GameObject FindIconInUI(UnityEngine.GameObject parent)
+        {
+            // Common icon names to look for
+            string[] iconNames = { "Icon", "icon", "ItemIcon", "WeaponIcon", "Sprite", "Image" };
+
+            foreach (var name in iconNames)
+            {
+                var found = parent.transform.Find(name);
+                if (found != null)
+                    return found.gameObject;
+            }
+
+            // Try to find any child with an Image component that looks like an icon
+            // (usually the first significant Image child)
+            var images = parent.GetComponentsInChildren<UnityEngine.UI.Image>(false);
+            foreach (var img in images)
+            {
+                // Skip backgrounds and frames (usually have "bg", "frame", "background" in name)
+                var goName = img.gameObject.name.ToLower();
+                if (goName.Contains("bg") || goName.Contains("frame") || goName.Contains("background"))
+                    continue;
+
+                // Skip if it's the parent itself
+                if (img.gameObject == parent)
+                    continue;
+
+                // Log what we found for debugging
+                if (images.Length > 0)
+                {
+                    MelonLogger.Msg($"  Potential icon: '{img.gameObject.name}'");
+                }
+
+                return img.gameObject;
+            }
+
+            return null;
+        }
+
+        private static void AddHoverToGameObject(UnityEngine.GameObject go, WeaponType? weaponType, ItemType? itemType)
+        {
+            // Check if already has event trigger
+            var existing = go.GetComponent<UnityEngine.EventSystems.EventTrigger>();
+            if (existing != null)
+            {
+                MelonLogger.Msg($"  Skipping hover (already has trigger): {go.name}");
+                return;
+            }
+
+            MelonLogger.Msg($"  Adding hover to: {go.name} (weapon={weaponType}, item={itemType})");
+            var eventTrigger = go.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+
+            var enterEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            enterEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter;
+            enterEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                ShowItemPopup(go.transform, weaponType, itemType);
+            }));
+            eventTrigger.triggers.Add(enterEntry);
+
+            var exitEntry = new UnityEngine.EventSystems.EventTrigger.Entry();
+            exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
+            exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
+            {
+                MelonLoader.MelonCoroutines.Start(DelayedHideCheck());
+            }));
+            eventTrigger.triggers.Add(exitEntry);
+        }
+
+        #endregion
+
+        #region Data Access Helpers
+
+        private static WeaponData GetWeaponData(WeaponType type)
+        {
+            if (cachedWeaponsDict == null) return null;
+
+            try
+            {
+                var dictType = cachedWeaponsDict.GetType();
+                var containsMethod = dictType.GetMethod("ContainsKey");
+                if (containsMethod != null && (bool)containsMethod.Invoke(cachedWeaponsDict, new object[] { type }))
+                {
+                    var indexer = dictType.GetProperty("Item");
+                    if (indexer != null)
+                    {
+                        // Dictionary value is List<WeaponData>, get the first item
+                        var list = indexer.GetValue(cachedWeaponsDict, new object[] { type }) as Il2CppSystem.Collections.Generic.List<WeaponData>;
+                        if (list != null && list.Count > 0)
+                        {
+                            return list[0];
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static object GetPowerUpData(ItemType type)
+        {
+            if (cachedPowerUpsDict == null) return null;
+
+            try
+            {
+                var dictType = cachedPowerUpsDict.GetType();
+                var containsMethod = dictType.GetMethod("ContainsKey");
+                if (containsMethod != null && (bool)containsMethod.Invoke(cachedPowerUpsDict, new object[] { type }))
+                {
+                    var indexer = dictType.GetProperty("Item");
+                    if (indexer != null)
+                    {
+                        return indexer.GetValue(cachedPowerUpsDict, new object[] { type });
+                    }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static System.Type spriteManagerType = null;
+
+        private static bool spriteManagerDebugLogged = false;
+
+        // Cached circle sprite for owned item highlights
+        private static UnityEngine.Sprite cachedCircleSprite = null;
+
+        /// <summary>
+        /// Creates or returns a cached circular sprite for highlighting owned items.
+        /// </summary>
+        private static UnityEngine.Sprite GetCircleSprite()
+        {
+            if (cachedCircleSprite != null)
+                return cachedCircleSprite;
+
+            try
+            {
+                // Create a circular texture
+                int size = 64;
+                var texture = new UnityEngine.Texture2D(size, size, UnityEngine.TextureFormat.RGBA32, false);
+                texture.filterMode = UnityEngine.FilterMode.Bilinear;
+
+                float center = size / 2f;
+                float radius = center - 1f;
+
+                for (int y = 0; y < size; y++)
+                {
+                    for (int x = 0; x < size; x++)
+                    {
+                        float dx = x - center;
+                        float dy = y - center;
+                        float dist = UnityEngine.Mathf.Sqrt(dx * dx + dy * dy);
+
+                        if (dist <= radius)
+                        {
+                            // Inside circle - white with soft edge
+                            float alpha = 1f;
+                            if (dist > radius - 2f)
+                            {
+                                // Soft edge for anti-aliasing
+                                alpha = (radius - dist) / 2f;
+                            }
+                            texture.SetPixel(x, y, new UnityEngine.Color(1f, 1f, 1f, alpha));
+                        }
+                        else
+                        {
+                            // Outside circle - transparent
+                            texture.SetPixel(x, y, new UnityEngine.Color(0f, 0f, 0f, 0f));
+                        }
+                    }
+                }
+
+                texture.Apply();
+
+                // Create sprite from texture
+                cachedCircleSprite = UnityEngine.Sprite.Create(
+                    texture,
+                    new UnityEngine.Rect(0, 0, size, size),
+                    new UnityEngine.Vector2(0.5f, 0.5f),
+                    100f
+                );
+
+                return cachedCircleSprite;
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error creating circle sprite: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static UnityEngine.Sprite LoadSpriteFromAtlas(string frameName, string atlasName)
+        {
+            try
+            {
+                // Initialize spriteManagerType if needed
+                if (spriteManagerType == null)
+                {
+                    foreach (var assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        spriteManagerType = assembly.GetTypes().FirstOrDefault(t => t.Name == "SpriteManager");
+                        if (spriteManagerType != null)
+                        {
+                            if (!spriteManagerDebugLogged)
+                            {
+                                MelonLogger.Msg($"[LoadSpriteFromAtlas] Found SpriteManager in {assembly.GetName().Name}");
+                                spriteManagerDebugLogged = true;
+                            }
+                            break;
+                        }
+                    }
+                    if (spriteManagerType == null && !spriteManagerDebugLogged)
+                    {
+                        MelonLogger.Warning("[LoadSpriteFromAtlas] SpriteManager type not found!");
+                        spriteManagerDebugLogged = true;
+                    }
+                }
+
+                if (spriteManagerType == null) return null;
+
+                var getSpriteFastMethod = spriteManagerType.GetMethod("GetSpriteFast",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new System.Type[] { typeof(string), typeof(string) },
+                    null);
+
+                if (getSpriteFastMethod != null)
+                {
+                    var result = getSpriteFastMethod.Invoke(null, new object[] { frameName, atlasName }) as UnityEngine.Sprite;
+                    if (result != null) return result;
+
+                    // Try without extension
+                    if (frameName.Contains("."))
+                    {
+                        var nameWithoutExt = frameName.Substring(0, frameName.LastIndexOf('.'));
+                        result = getSpriteFastMethod.Invoke(null, new object[] { nameWithoutExt, atlasName }) as UnityEngine.Sprite;
+                    }
+                    return result;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static bool spriteLoadDebugLogged = false;
+
+        private static UnityEngine.Sprite GetSpriteForWeapon(WeaponType weaponType)
+        {
+            var data = GetWeaponData(weaponType);
+            if (data == null)
+            {
+                if (!spriteLoadDebugLogged)
+                {
+                    MelonLogger.Msg($"[GetSpriteForWeapon] {weaponType}: data is null");
+                }
+                return null;
+            }
+
+            try
+            {
+                string frameName = data.frameName;
+                // Property is "texture" not "textureName"
+                string atlasName = GetPropertyValue<string>(data, "texture");
+
+                if (!spriteLoadDebugLogged)
+                {
+                    MelonLogger.Msg($"[GetSpriteForWeapon] {weaponType}: frame={frameName ?? "null"}, atlas={atlasName ?? "null"}");
+                    spriteLoadDebugLogged = true;
+                }
+
+                if (!string.IsNullOrEmpty(frameName) && !string.IsNullOrEmpty(atlasName))
+                {
+                    return LoadSpriteFromAtlas(frameName, atlasName);
+                }
+
+                // Fallback: try common atlas names
+                if (!string.IsNullOrEmpty(frameName))
+                {
+                    string[] fallbackAtlases = { "weapons", "items", "characters", "ui" };
+                    foreach (var atlas in fallbackAtlases)
+                    {
+                        var sprite = LoadSpriteFromAtlas(frameName, atlas);
+                        if (sprite != null) return sprite;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[GetSpriteForWeapon] Error: {ex.Message}");
+            }
+            return null;
+        }
+
+        private static UnityEngine.Sprite GetSpriteForItem(ItemType itemType)
+        {
+            var data = GetPowerUpData(itemType);
+            if (data == null) return null;
+
+            try
+            {
+                string frameName = GetPropertyValue<string>(data, "frameName");
+                // Property is "texture" not "textureName"
+                string atlasName = GetPropertyValue<string>(data, "texture");
+
+                if (!string.IsNullOrEmpty(frameName) && !string.IsNullOrEmpty(atlasName))
+                {
+                    return LoadSpriteFromAtlas(frameName, atlasName);
+                }
+
+                // Fallback: try common atlas names
+                if (!string.IsNullOrEmpty(frameName))
+                {
+                    string[] fallbackAtlases = { "items", "powerups", "weapons", "ui" };
+                    foreach (var atlas in fallbackAtlases)
+                    {
+                        var sprite = LoadSpriteFromAtlas(frameName, atlas);
+                        if (sprite != null) return sprite;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static T GetPropertyValue<T>(object obj, string propertyName)
+        {
+            if (obj == null) return default;
+
+            try
+            {
+                var prop = obj.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
+                if (prop != null)
+                    return (T)prop.GetValue(obj);
+
+                var field = obj.GetType().GetField(propertyName, BindingFlags.Public | BindingFlags.Instance);
+                if (field != null)
+                    return (T)field.GetValue(obj);
+            }
+            catch { }
+
+            return default;
+        }
+
+        private static Il2CppTMPro.TMP_FontAsset GetFont()
+        {
+            // Try to find an existing TMP text component to get its font
+            var existingTmp = UnityEngine.Object.FindObjectOfType<Il2CppTMPro.TextMeshProUGUI>();
+            return existingTmp?.font;
+        }
+
+        #endregion
+    }
+
+    #region Harmony Patches
+
+    public static class LevelUpPagePatches
+    {
+        public static void Show_Postfix(LevelUpPage __instance)
+        {
+            MelonLogger.Msg("LevelUpPage.Show postfix fired!");
+            try
+            {
+                MelonLogger.Msg($"Instance type: {__instance?.GetType().Name ?? "null"}");
+                var dataManager = __instance.Data;
+                MelonLogger.Msg($"DataManager: {(dataManager != null ? dataManager.GetType().Name : "null")}");
+                if (dataManager != null)
+                {
+                    ItemTooltipsMod.CacheDataManager(dataManager);
+                    MelonLogger.Msg("Cached DataManager from LevelUpPage");
+                }
+                else
+                {
+                    MelonLogger.Warning("DataManager was null!");
+                }
+
+                // Try to find and cache the game session
+                TryCacheGameSessionFromLevelUpPage(__instance);
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Error($"Error in LevelUpPage.Show patch: {ex}");
+            }
+        }
+
+        private static void TryCacheGameSessionFromLevelUpPage(LevelUpPage page)
+        {
+            if (page == null) return;
+
+            var pageType = page.GetType();
+
+            // Log all properties for debugging
+            var allProps = pageType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                .Select(p => $"{p.Name}({p.PropertyType.Name})")
+                .Take(15)
+                .ToList();
+            MelonLogger.Msg($"LevelUpPage properties: {string.Join(", ", allProps)}");
+
+            // Also log fields
+            var allFields = pageType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                .Select(f => $"{f.Name}({f.FieldType.Name})")
+                .Take(15)
+                .ToList();
+            MelonLogger.Msg($"LevelUpPage fields: {string.Join(", ", allFields)}");
+
+            // Try various property/field names for game session
+            string[] sessionNames = { "_gameSession", "GameSession", "gameSession", "_session", "Session" };
+
+            foreach (var name in sessionNames)
+            {
+                // Try property
+                var prop = pageType.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (prop != null)
+                {
+                    try
+                    {
+                        var session = prop.GetValue(page);
+                        if (session != null && ValidateGameSession(session))
+                        {
+                            ItemTooltipsMod.CacheGameSession(session);
+                            MelonLogger.Msg($"Cached GameSession from LevelUpPage.{name} property");
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MelonLogger.Warning($"Error accessing {name} property: {ex.Message}");
+                    }
+                }
+
+                // Try field
+                var field = pageType.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field != null)
+                {
+                    try
+                    {
+                        var session = field.GetValue(page);
+                        if (session != null && ValidateGameSession(session))
+                        {
+                            ItemTooltipsMod.CacheGameSession(session);
+                            MelonLogger.Msg($"Cached GameSession from LevelUpPage.{name} field");
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MelonLogger.Warning($"Error accessing {name} field: {ex.Message}");
+                    }
+                }
+            }
+
+            // Try to find any property that returns something with ActiveCharacter
+            foreach (var prop in pageType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                if (prop.Name.ToLower().Contains("session") || prop.Name.ToLower().Contains("game"))
+                {
+                    try
+                    {
+                        var value = prop.GetValue(page);
+                        if (value != null && ValidateGameSession(value))
+                        {
+                            ItemTooltipsMod.CacheGameSession(value);
+                            MelonLogger.Msg($"Cached GameSession from LevelUpPage.{prop.Name}");
+                            return;
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            MelonLogger.Warning("Could not find GameSession in LevelUpPage!");
+        }
+
+        private static bool ValidateGameSession(object session)
+        {
+            if (session == null) return false;
+
+            var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+            return charProp != null;
+        }
+    }
+
+    public static class GenericPagePatches
+    {
+        public static void Show_Postfix(object __instance)
+        {
+            try
+            {
+                var dataManager = GetDataManager(__instance);
+                if (dataManager != null)
+                {
+                    ItemTooltipsMod.CacheDataManager(dataManager);
+                    MelonLogger.Msg($"Cached DataManager from {__instance.GetType().Name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in page Show patch: {ex.Message}");
+            }
+        }
+
+        private static object GetDataManager(object page)
+        {
+            var type = page.GetType();
+
+            // Try "Data" property
+            var dataProp = type.GetProperty("Data", BindingFlags.Public | BindingFlags.Instance);
+            if (dataProp != null)
+            {
+                var result = dataProp.GetValue(page);
+                if (result != null) return result;
+            }
+
+            // Try "_data" field
+            var dataField = type.GetField("_data", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (dataField != null)
+            {
+                var result = dataField.GetValue(page);
+                if (result != null) return result;
+            }
+
+            // Try base class
+            var baseType = type.BaseType;
+            while (baseType != null)
+            {
+                dataProp = baseType.GetProperty("Data", BindingFlags.Public | BindingFlags.Instance);
+                if (dataProp != null)
+                {
+                    var result = dataProp.GetValue(page);
+                    if (result != null) return result;
+                }
+                baseType = baseType.BaseType;
+            }
+
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Generic patches for ANY component that takes WeaponType or ItemType.
+    /// This enables automatic tooltip support on all icon types.
+    /// </summary>
+    public static class GenericIconPatches
+    {
+        public static void SetWeapon_Postfix(object __instance, WeaponType __0, MethodBase __originalMethod)
+        {
+            try
+            {
+                var go = GetGameObject(__instance);
+                if (go != null)
+                {
+                    // For "Add" methods (like AddAffectedWeapon), the icon is a newly created child
+                    bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
+                    ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, __0, isAddMethod);
+                    MelonLogger.Msg($"Auto-registered weapon icon: {__0} on {go.name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in generic weapon patch: {ex.Message}");
+            }
+        }
+
+        public static void SetItem_Postfix(object __instance, ItemType __0, MethodBase __originalMethod)
+        {
+            try
+            {
+                var go = GetGameObject(__instance);
+                if (go != null)
+                {
+                    bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
+                    ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, __0, isAddMethod);
+                    MelonLogger.Msg($"Auto-registered item icon: {__0} on {go.name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in generic item patch: {ex.Message}");
+            }
+        }
+
+        // For methods where WeaponType is the second parameter (index 1)
+        // Also tries to cache game session from other params (like page at __2)
+        public static void SetWeapon_Postfix_Arg1(object __instance, object __0, WeaponType __1, object[] __args, MethodBase __originalMethod)
+        {
+            try
+            {
+                // Try to cache game session from any page-like arguments
+                if (__args != null)
+                {
+                    foreach (var arg in __args)
+                    {
+                        if (arg != null && !(arg is WeaponType))
+                        {
+                            TryCacheSessionFromArg(arg);
+                        }
+                    }
+                }
+
+                var go = GetGameObject(__instance);
+                if (go != null)
+                {
+                    bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
+                    ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, __1, isAddMethod);
+                    MelonLogger.Msg($"Auto-registered weapon icon (arg1): {__1} on {go.name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in generic weapon patch (arg1): {ex.Message}");
+            }
+        }
+
+        // For methods where ItemType is the second parameter (index 1)
+        // Also tries to cache game session from other params (like page at __2)
+        public static void SetItem_Postfix_Arg1(object __instance, object __0, ItemType __1, object[] __args, MethodBase __originalMethod)
+        {
+            try
+            {
+                // Try to cache game session from any page-like arguments
+                if (__args != null)
+                {
+                    foreach (var arg in __args)
+                    {
+                        if (arg != null && !(arg is ItemType))
+                        {
+                            TryCacheSessionFromArg(arg);
+                        }
+                    }
+                }
+
+                var go = GetGameObject(__instance);
+                if (go != null)
+                {
+                    bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
+                    ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, __1, isAddMethod);
+                    MelonLogger.Msg($"Auto-registered item icon (arg1): {__1} on {go.name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in generic item patch (arg1): {ex.Message}");
+            }
+        }
+
+        // For methods where WeaponType is at position 2 or later - use reflection to find it
+        public static void SetWeapon_Postfix_ArgN(object __instance, object[] __args, MethodBase __originalMethod)
+        {
+            try
+            {
+                var go = GetGameObject(__instance);
+                if (go == null) return;
+
+                bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
+                WeaponType? foundType = null;
+
+                // Search all arguments for WeaponType and page objects
+                foreach (var arg in __args)
+                {
+                    if (arg == null) continue;
+
+                    if (arg is WeaponType wt)
+                    {
+                        foundType = wt;
+                    }
+                    else
+                    {
+                        // Try to cache game session from page-like arguments
+                        TryCacheSessionFromArg(arg);
+                    }
+                }
+
+                if (foundType.HasValue)
+                {
+                    ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, foundType.Value, isAddMethod);
+                    MelonLogger.Msg($"Auto-registered weapon icon (argN): {foundType.Value} on {go.name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in generic weapon patch (argN): {ex.Message}");
+            }
+        }
+
+        // For methods where ItemType is at position 2 or later
+        public static void SetItem_Postfix_ArgN(object __instance, object[] __args, MethodBase __originalMethod)
+        {
+            try
+            {
+                var go = GetGameObject(__instance);
+                if (go == null) return;
+
+                bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
+                ItemType? foundType = null;
+
+                // Search all arguments for ItemType and page objects
+                foreach (var arg in __args)
+                {
+                    if (arg == null) continue;
+
+                    if (arg is ItemType it)
+                    {
+                        foundType = it;
+                    }
+                    else
+                    {
+                        // Try to cache game session from page-like arguments
+                        TryCacheSessionFromArg(arg);
+                    }
+                }
+
+                if (foundType.HasValue)
+                {
+                    ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, foundType.Value, isAddMethod);
+                    MelonLogger.Msg($"Auto-registered item icon (argN): {foundType.Value} on {go.name}");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in generic item patch (argN): {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Tries to cache the game session from an argument that might be a page object or CharacterController.
+        /// </summary>
+        private static void TryCacheSessionFromArg(object arg)
+        {
+            if (arg == null) return;
+
+            var argType = arg.GetType();
+            var typeName = argType.Name.ToLower();
+
+            // Check if this is a CharacterController - if so, try to get session from it
+            if (typeName.Contains("character") || typeName.Contains("controller"))
+            {
+                TryCacheSessionFromCharacter(arg);
+                return;
+            }
+
+            // Only try for types that look like pages
+            if (!typeName.Contains("page") && !typeName.Contains("view") && !typeName.Contains("window"))
+                return;
+
+            // Try common property names for game session
+            string[] sessionNames = { "_gameSession", "GameSession", "gameSession", "_session" };
+
+            foreach (var name in sessionNames)
+            {
+                var prop = argType.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (prop != null)
+                {
+                    try
+                    {
+                        var session = prop.GetValue(arg);
+                        if (session != null)
+                        {
+                            // Verify it has ActiveCharacter
+                            var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                            if (charProp != null)
+                            {
+                                ItemTooltipsMod.CacheGameSession(session);
+                                MelonLogger.Msg($"Cached GameSession from {argType.Name}.{name}");
+                                return;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                var field = argType.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field != null)
+                {
+                    try
+                    {
+                        var session = field.GetValue(arg);
+                        if (session != null)
+                        {
+                            var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                            if (charProp != null)
+                            {
+                                ItemTooltipsMod.CacheGameSession(session);
+                                MelonLogger.Msg($"Cached GameSession from {argType.Name}.{name} field");
+                                return;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Tries to cache the game session from a CharacterController object.
+        /// Path: CharacterController → _gameManager → _stage → GameSession
+        /// </summary>
+        private static void TryCacheSessionFromCharacter(object character)
+        {
+            if (character == null) return;
+
+            var charType = character.GetType();
+            MelonLogger.Msg($"[TryCacheSessionFromCharacter] Checking {charType.Name}...");
+
+            try
+            {
+                // CharacterController has _gameManager
+                var gameManagerProp = charType.GetProperty("_gameManager", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (gameManagerProp == null) return;
+
+                var gameManager = gameManagerProp.GetValue(character);
+                if (gameManager == null) return;
+
+                MelonLogger.Msg($"[TryCacheSessionFromCharacter] Got _gameManager: {gameManager.GetType().Name}");
+
+                // Try to get GameSession directly from GameManager first
+                if (TryGetSessionFromObject(gameManager, "GameManager"))
+                    return;
+
+                // Try GameManager._stage
+                var stageProp = gameManager.GetType().GetProperty("_stage", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (stageProp != null)
+                {
+                    var stage = stageProp.GetValue(gameManager);
+                    if (stage != null)
+                    {
+                        MelonLogger.Msg($"[TryCacheSessionFromCharacter] Got _stage: {stage.GetType().Name}");
+                        if (TryGetSessionFromObject(stage, "Stage"))
+                            return;
+
+                        // Log stage properties
+                        var stageProps = stage.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                            .Select(p => p.Name)
+                            .Take(20)
+                            .ToList();
+                        MelonLogger.Msg($"[TryCacheSessionFromCharacter] Stage props: {string.Join(", ", stageProps)}");
+                    }
+                }
+
+                // Try GameManager._adventureManager
+                var advProp = gameManager.GetType().GetProperty("_adventureManager", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (advProp != null)
+                {
+                    var advManager = advProp.GetValue(gameManager);
+                    if (advManager != null)
+                    {
+                        MelonLogger.Msg($"[TryCacheSessionFromCharacter] Got _adventureManager: {advManager.GetType().Name}");
+                        if (TryGetSessionFromObject(advManager, "AdventureManager"))
+                            return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[TryCacheSessionFromCharacter] Error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Tries to find GameSession property on an object. Also tries to get DataManager.
+        /// </summary>
+        private static bool TryGetSessionFromObject(object obj, string objName)
+        {
+            if (obj == null) return false;
+
+            // Also try to cache DataManager directly from this object (e.g., GameManager might have it)
+            TryCacheDataManagerFromObject(obj, objName);
+
+            // GameManager uses "GameSessionData" as the property name!
+            string[] sessionNames = { "GameSessionData", "_gameSession", "GameSession", "gameSession", "_session", "Session", "CurrentSession", "_currentSession" };
+            foreach (var name in sessionNames)
+            {
+                try
+                {
+                    var prop = obj.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (prop != null)
+                    {
+                        var session = prop.GetValue(obj);
+                        if (session != null)
+                        {
+                            var activeCharProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                            if (activeCharProp != null)
+                            {
+                                ItemTooltipsMod.CacheGameSession(session);
+                                MelonLogger.Msg($"[TryCacheSession] Found via {objName}.{name}!");
+                                return true;
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Tries to cache DataManager from a GameManager component.
+        /// </summary>
+        public static void TryCacheDataManagerFromGameManager(object gameManager)
+        {
+            if (gameManager == null) return;
+            if (ItemTooltipsMod.HasCachedDataManager()) return;
+
+            var gmType = gameManager.GetType();
+            MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Checking GameManager for DataManager...");
+
+            // Try "Data" property first (what UnityExplorer shows)
+            string[] dataNames = { "Data", "_data", "DataManager", "_dataManager" };
+            foreach (var name in dataNames)
+            {
+                try
+                {
+                    // Try property
+                    var prop = gmType.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (prop != null)
+                    {
+                        var dm = prop.GetValue(gameManager);
+                        if (dm != null)
+                        {
+                            MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Found {name} property: {dm.GetType().Name}");
+                            if (dm.GetType().Name.Contains("DataManager"))
+                            {
+                                ItemTooltipsMod.CacheDataManager(dm);
+                                MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Cached DataManager from GameManager.{name}!");
+                                return;
+                            }
+                        }
+                    }
+
+                    // Try IL2CPP getter method (get_PropertyName)
+                    var getMethod = gmType.GetMethod($"get_{name}", BindingFlags.Public | BindingFlags.Instance);
+                    if (getMethod != null)
+                    {
+                        var dm = getMethod.Invoke(gameManager, null);
+                        if (dm != null)
+                        {
+                            MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Found get_{name}(): {dm.GetType().Name}");
+                            if (dm.GetType().Name.Contains("DataManager"))
+                            {
+                                ItemTooltipsMod.CacheDataManager(dm);
+                                MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Cached DataManager from GameManager.get_{name}()!");
+                                return;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Error with {name}: {ex.Message}");
+                }
+            }
+
+            // List available properties for debugging
+            var props = gmType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Select(p => p.Name).Take(25).ToList();
+            MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Available properties: {string.Join(", ", props)}");
+        }
+
+        /// <summary>
+        /// Tries to cache DataManager directly from an object like GameManager.
+        /// </summary>
+        private static void TryCacheDataManagerFromObject(object obj, string objName)
+        {
+            if (obj == null) return;
+
+            string[] dataNames = { "Data", "_data", "DataManager", "_dataManager", "data" };
+            foreach (var name in dataNames)
+            {
+                try
+                {
+                    var prop = obj.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (prop != null)
+                    {
+                        var dm = prop.GetValue(obj);
+                        if (dm != null && dm.GetType().Name.Contains("DataManager"))
+                        {
+                            ItemTooltipsMod.CacheDataManager(dm);
+                            MelonLogger.Msg($"[TryCacheDataManager] Found via {objName}.{name}!");
+                            return;
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static UnityEngine.GameObject GetGameObject(object instance)
+        {
+            var gameObjectProp = instance.GetType().GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance);
+            return gameObjectProp?.GetValue(instance) as UnityEngine.GameObject;
+        }
+    }
+
+    public static class EquipmentIconPatches
+    {
+        public static void SetData_Postfix(object __instance)
+        {
+            try
+            {
+                var instanceType = __instance.GetType();
+                var gameObjectProp = instanceType.GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance);
+
+                if (gameObjectProp == null) return;
+
+                var go = gameObjectProp.GetValue(__instance) as UnityEngine.GameObject;
+                if (go == null) return;
+
+                // Try to get Type property
+                var typeProp = instanceType.GetProperty("Type", BindingFlags.Public | BindingFlags.Instance);
+                if (typeProp != null)
+                {
+                    var typeVal = typeProp.GetValue(__instance);
+                    if (typeVal is WeaponType wt)
+                    {
+                        ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, wt);
+                        MelonLogger.Msg($"Registered pause icon weapon: {wt}");
+                    }
+                    else if (typeVal is ItemType it)
+                    {
+                        ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, it);
+                        MelonLogger.Msg($"Registered pause icon item: {it}");
+                    }
+                }
+
+                // Also try _weaponType or _itemType fields
+                var weaponField = instanceType.GetField("_weaponType", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (weaponField != null)
+                {
+                    var val = weaponField.GetValue(__instance);
+                    if (val is WeaponType wt)
+                    {
+                        ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, wt);
+                        MelonLogger.Msg($"Registered pause icon weapon (field): {wt}");
+                    }
+                }
+
+                var itemField = instanceType.GetField("_itemType", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (itemField != null)
+                {
+                    var val = itemField.GetValue(__instance);
+                    if (val is ItemType it)
+                    {
+                        ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, it);
+                        MelonLogger.Msg($"Registered pause icon item (field): {it}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in EquipmentIcon patch: {ex.Message}");
+            }
+        }
+    }
+
+    public static class LevelUpItemUIPatches
+    {
+        // SetWeaponData signature: SetWeaponData(LevelUpPage page, WeaponType type, ...)
+        // __0 = page, __1 = type (but we use named param for type)
+        public static void SetWeaponData_Postfix(object __instance, object __0, WeaponType type)
+        {
+            try
+            {
+                // Try to cache game session from the page parameter (__0 = LevelUpPage)
+                TryCacheGameSessionFromPage(__0);
+
+                // Get the GameObject from the instance using reflection
+                var instanceType = __instance.GetType();
+                var gameObjectProp = instanceType.GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance);
+                var getInstanceIdMethod = instanceType.GetMethod("GetInstanceID", BindingFlags.Public | BindingFlags.Instance);
+
+                if (gameObjectProp != null && getInstanceIdMethod != null)
+                {
+                    var go = gameObjectProp.GetValue(__instance) as UnityEngine.GameObject;
+                    int instanceId = (int)getInstanceIdMethod.Invoke(__instance, null);
+
+                    if (go != null)
+                    {
+                        ItemTooltipsMod.RegisterWeaponUI(instanceId, go, type);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in SetWeaponData patch: {ex.Message}");
+            }
+        }
+
+        // SetItemData signature: SetItemData(ItemType type, ItemData data, LevelUpPage page, ...)
+        // __0 = type, __2 = page
+        public static void SetItemData_Postfix(object __instance, object __2, ItemType type)
+        {
+            try
+            {
+                // Try to cache game session from the page parameter (__2 = LevelUpPage)
+                TryCacheGameSessionFromPage(__2);
+
+                var instanceType = __instance.GetType();
+                var gameObjectProp = instanceType.GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance);
+                var getInstanceIdMethod = instanceType.GetMethod("GetInstanceID", BindingFlags.Public | BindingFlags.Instance);
+
+                if (gameObjectProp != null && getInstanceIdMethod != null)
+                {
+                    var go = gameObjectProp.GetValue(__instance) as UnityEngine.GameObject;
+                    int instanceId = (int)getInstanceIdMethod.Invoke(__instance, null);
+
+                    if (go != null)
+                    {
+                        ItemTooltipsMod.RegisterItemUI(instanceId, go, type);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error in SetItemData patch: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Tries to extract and cache the game session from a LevelUpPage or similar page object.
+        /// </summary>
+        private static void TryCacheGameSessionFromPage(object page)
+        {
+            if (page == null) return;
+
+            try
+            {
+                var pageType = page.GetType();
+
+                // List of property/field names that might hold the game session
+                string[] sessionNames = { "_gameSession", "GameSession", "gameSession", "_session", "Session" };
+
+                foreach (var name in sessionNames)
+                {
+                    // Try property first
+                    var prop = pageType.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (prop != null)
+                    {
+                        var session = prop.GetValue(page);
+                        if (session != null)
+                        {
+                            // Verify it looks like a game session (has ActiveCharacter)
+                            var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                            if (charProp != null)
+                            {
+                                ItemTooltipsMod.CacheGameSession(session);
+                                MelonLogger.Msg($"Cached GameSession from {pageType.Name}.{name} property");
+                                return;
+                            }
+                        }
+                    }
+
+                    // Try field
+                    var field = pageType.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (field != null)
+                    {
+                        var session = field.GetValue(page);
+                        if (session != null)
+                        {
+                            var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                            if (charProp != null)
+                            {
+                                ItemTooltipsMod.CacheGameSession(session);
+                                MelonLogger.Msg($"Cached GameSession from {pageType.Name}.{name} field");
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // If no direct session property, check if the page itself has ActiveCharacter
+                // (in case the page IS the session or has it directly)
+                var directCharProp = pageType.GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                if (directCharProp != null)
+                {
+                    ItemTooltipsMod.CacheGameSession(page);
+                    MelonLogger.Msg($"Cached {pageType.Name} as GameSession (has ActiveCharacter)");
+                    return;
+                }
+
+                // Log what properties we found for debugging
+                var allProps = pageType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Select(p => p.Name)
+                    .Take(10)
+                    .ToList();
+                MelonLogger.Msg($"  {pageType.Name} properties: {string.Join(", ", allProps)}...");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error caching session from page: {ex.Message}");
+            }
+        }
+    }
+
+    #endregion
+}
