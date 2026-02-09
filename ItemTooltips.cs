@@ -55,6 +55,7 @@ namespace VSItemTooltips
         private static Dictionary<string, WeaponType> spriteToWeaponType = null;
         private static Dictionary<string, ItemType> spriteToItemType = null;
         private static bool lookupTablesBuilt = false;
+        private static bool loggedLookupTables = false;
 
         // Data manager cache
         private static object cachedDataManager = null;
@@ -101,16 +102,12 @@ namespace VSItemTooltips
             {
                 // Patch to capture DataManager when LevelUpPage is shown
                 var levelUpPageType = typeof(LevelUpPage);
-                MelonLogger.Msg($"LevelUpPage type: {levelUpPageType.FullName}");
-
                 // Try OnShowStart first (called when page is shown)
                 var showMethod = levelUpPageType.GetMethod("OnShowStart", BindingFlags.Public | BindingFlags.Instance);
                 if (showMethod != null)
                 {
-                    MelonLogger.Msg($"Found OnShowStart method: {showMethod.GetParameters().Length} params");
                     harmonyInstance.Patch(showMethod,
                         postfix: new HarmonyMethod(typeof(LevelUpPagePatches), nameof(LevelUpPagePatches.Show_Postfix)));
-                    MelonLogger.Msg("Patched LevelUpPage.OnShowStart");
                 }
                 else
                 {
@@ -148,14 +145,11 @@ namespace VSItemTooltips
 
                         if (itemUIType != null)
                         {
-                            MelonLogger.Msg($"Found LevelUpItemUI: {itemUIType.FullName}");
-
                             var setWeaponMethod = itemUIType.GetMethod("SetWeaponData", BindingFlags.Public | BindingFlags.Instance);
                             if (setWeaponMethod != null)
                             {
                                 harmonyInstance.Patch(setWeaponMethod,
                                     postfix: new HarmonyMethod(typeof(LevelUpItemUIPatches), nameof(LevelUpItemUIPatches.SetWeaponData_Postfix)));
-                                MelonLogger.Msg("Patched LevelUpItemUI.SetWeaponData");
                             }
                             else
                             {
@@ -167,7 +161,6 @@ namespace VSItemTooltips
                             {
                                 harmonyInstance.Patch(setItemMethod,
                                     postfix: new HarmonyMethod(typeof(LevelUpItemUIPatches), nameof(LevelUpItemUIPatches.SetItemData_Postfix)));
-                                MelonLogger.Msg("Patched LevelUpItemUI.SetItemData");
                             }
                             else
                             {
@@ -191,8 +184,6 @@ namespace VSItemTooltips
         {
             try
             {
-                MelonLogger.Msg("Searching for equipment icon types...");
-
                 // Discover ArcanaType enum early so we can patch arcana methods
                 System.Type arcanaTypeEnum = null;
                 try
@@ -202,7 +193,6 @@ namespace VSItemTooltips
                     if (arcanaTypeEnum != null)
                     {
                         cachedArcanaTypeEnum = arcanaTypeEnum;
-                        MelonLogger.Msg($"Discovered ArcanaType enum: {arcanaTypeEnum.FullName}");
                     }
                 }
                 catch { }
@@ -226,9 +216,6 @@ namespace VSItemTooltips
 
                         foreach (var iconType in iconTypes)
                         {
-                            // Log all found types
-                            MelonLogger.Msg($"Found type: {iconType.FullName}");
-
                             // Look for methods that take WeaponType, ItemType, or ArcanaType
                             var interestingMethods = iconType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
                                 .Where(m => m.GetParameters().Any(p =>
@@ -241,9 +228,6 @@ namespace VSItemTooltips
 
                             foreach (var m in interestingMethods)
                             {
-                                var parms = string.Join(", ", m.GetParameters().Select(p => $"{p.ParameterType.Name} {p.Name}"));
-                                MelonLogger.Msg($"  -> {m.Name}({parms})");
-
                                 // Try to patch methods that look like they set weapon/item data
                                 if (m.Name.Contains("Set") || m.Name.Contains("Init") || m.Name.Contains("Setup") ||
                                     m.Name.Contains("Add") || m.Name.Contains("Spawn") || m.Name.Contains("Create"))
@@ -279,7 +263,6 @@ namespace VSItemTooltips
 
                                             harmonyInstance.Patch(m,
                                                 postfix: new HarmonyMethod(typeof(GenericIconPatches), patchMethod));
-                                            MelonLogger.Msg($"  PATCHED: {iconType.Name}.{m.Name} (weapon, param {weaponParamIndex})");
                                         }
                                         else if (itemParamIndex >= 0)
                                         {
@@ -293,13 +276,11 @@ namespace VSItemTooltips
 
                                             harmonyInstance.Patch(m,
                                                 postfix: new HarmonyMethod(typeof(GenericIconPatches), patchMethod));
-                                            MelonLogger.Msg($"  PATCHED: {iconType.Name}.{m.Name} (item, param {itemParamIndex})");
                                         }
                                         else if (arcanaParamIndex >= 0)
                                         {
                                             harmonyInstance.Patch(m,
                                                 postfix: new HarmonyMethod(typeof(GenericIconPatches), nameof(GenericIconPatches.SetArcana_Postfix_ArgN)));
-                                            MelonLogger.Msg($"  PATCHED: {iconType.Name}.{m.Name} (arcana, param {arcanaParamIndex})");
                                         }
                                     }
                                     catch (Exception patchEx)
@@ -338,7 +319,6 @@ namespace VSItemTooltips
                             {
                                 harmonyInstance.Patch(showMethod,
                                     postfix: new HarmonyMethod(typeof(GenericPagePatches), nameof(GenericPagePatches.Show_Postfix)));
-                                MelonLogger.Msg($"Patched {merchantType.Name}.Show");
                                 return;
                             }
                         }
@@ -358,8 +338,6 @@ namespace VSItemTooltips
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
         {
-            MelonLogger.Msg($"Scene loaded: {sceneName} (index {buildIndex})");
-
             // Reset caching state when a new scene loads
             triedEarlyCaching = false;
         }
@@ -373,9 +351,6 @@ namespace VSItemTooltips
 
             try
             {
-                // Try to find DataManager from various sources
-                MelonLogger.Msg("Attempting early DataManager caching...");
-
                 // Method 1: Try FindObjectOfType for DataManager directly
                 try
                 {
@@ -385,7 +360,6 @@ namespace VSItemTooltips
 
                     if (dataManagerType != null)
                     {
-                        MelonLogger.Msg($"Found DataManager type: {dataManagerType.FullName}");
 
                         var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new System.Type[0]);
                         if (findMethod != null)
@@ -394,17 +368,13 @@ namespace VSItemTooltips
                             var dm = genericMethod.Invoke(null, null);
                             if (dm != null)
                             {
-                                MelonLogger.Msg($"Found DataManager via FindObjectOfType!");
                                 CacheDataManager(dm);
                                 return;
                             }
                         }
                     }
                 }
-                catch (Exception ex1)
-                {
-                    MelonLogger.Msg($"Method 1 (FindObjectOfType) failed: {ex1.Message}");
-                }
+                catch { }
 
                 // Method 2: Try GameManager.Instance.Data
                 var gameManagerType = System.AppDomain.CurrentDomain.GetAssemblies()
@@ -426,7 +396,6 @@ namespace VSItemTooltips
                                 instance = prop.GetValue(null);
                                 if (instance != null)
                                 {
-                                    MelonLogger.Msg($"Found GameManager via {prop.Name}");
                                     break;
                                 }
                             }
@@ -435,7 +404,6 @@ namespace VSItemTooltips
                                 instance = field.GetValue(null);
                                 if (instance != null)
                                 {
-                                    MelonLogger.Msg($"Found GameManager via field {field.Name}");
                                     break;
                                 }
                             }
@@ -456,7 +424,6 @@ namespace VSItemTooltips
                                     var val = prop.GetValue(instance);
                                     if (val != null)
                                     {
-                                        MelonLogger.Msg($"Found DataManager via GameManager.{prop.Name}!");
                                         CacheDataManager(val);
                                         return;
                                     }
@@ -474,13 +441,11 @@ namespace VSItemTooltips
                     var getWeaponsMethod = mb.GetType().GetMethod("GetConvertedWeapons");
                     if (getWeaponsMethod != null)
                     {
-                        MelonLogger.Msg($"Found DataManager via MonoBehaviour search: {mb.GetType().Name}");
                         CacheDataManager(mb);
                         return;
                     }
                 }
 
-                MelonLogger.Msg("Early caching: DataManager not found yet");
             }
             catch (Exception ex)
             {
@@ -500,49 +465,20 @@ namespace VSItemTooltips
             if (UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.Escape))
             {
                 escWasPressed = true;
-                MelonLogger.Msg("ESC pressed! Scanning for pause UI...");
 
-                // Search for Safe Area and log all children
+                // Search for Safe Area and find pause view
                 var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
                 if (safeArea != null)
                 {
-                    MelonLogger.Msg($"Safe Area found, {safeArea.transform.childCount} children:");
                     for (int i = 0; i < safeArea.transform.childCount; i++)
                     {
                         var child = safeArea.transform.GetChild(i);
-                        MelonLogger.Msg($"  [{i}] {child.name} active={child.gameObject.activeInHierarchy}");
 
                         // If this child is active and looks like a pause view, cache it
                         if (child.gameObject.activeInHierarchy &&
                             (child.name.ToLower().Contains("map") || child.name.ToLower().Contains("pause")))
                         {
                             pauseView = child.gameObject;
-                            MelonLogger.Msg($"  -> Set as pauseView!");
-                        }
-                    }
-                }
-                else
-                {
-                    MelonLogger.Msg("Safe Area not found!");
-
-                    // Try alternative paths
-                    string[] altPaths = new string[] {
-                        "GAME UI/Canvas - Game UI",
-                        "GAME UI",
-                        "Canvas"
-                    };
-                    foreach (var path in altPaths)
-                    {
-                        var found = UnityEngine.GameObject.Find(path);
-                        if (found != null)
-                        {
-                            MelonLogger.Msg($"Found: {path} with {found.transform.childCount} children");
-                            for (int i = 0; i < found.transform.childCount && i < 10; i++)
-                            {
-                                var child = found.transform.GetChild(i);
-                                MelonLogger.Msg($"  [{i}] {child.name}");
-                            }
-                            break;
                         }
                     }
                 }
@@ -555,16 +491,6 @@ namespace VSItemTooltips
             {
                 collectionIcons.Clear();
                 HideCollectionPopup();
-                // Log which views triggered the pause
-                var activeViewNames = new System.Collections.Generic.List<string>();
-                if (levelUpView != null && levelUpView.activeInHierarchy) activeViewNames.Add("LevelUp");
-                if (merchantView != null && merchantView.activeInHierarchy) activeViewNames.Add("Merchant");
-                if (pauseView != null && pauseView.activeInHierarchy) activeViewNames.Add("Pause");
-                if (itemFoundView != null && itemFoundView.activeInHierarchy) activeViewNames.Add("ItemFound");
-                if (arcanaView != null && arcanaView.activeInHierarchy) activeViewNames.Add("Arcana");
-                if (activeViewNames.Count == 0) activeViewNames.Add("timeScale=0");
-
-                MelonLogger.Msg($"Game paused via: {string.Join(", ", activeViewNames)} - enabling tooltips");
                 ClearTrackedIcons();
 
                 // If paused, scan the pause view for equipment icons
@@ -595,7 +521,6 @@ namespace VSItemTooltips
             // State change: became unpaused
             if (!isGamePaused && wasGamePaused)
             {
-                MelonLogger.Msg("Game unpaused - disabling tooltips");
                 HidePopup();
                 ClearTrackedIcons();
                 loggedScanStatus = false; // Reset so we can warn again if needed
@@ -608,7 +533,6 @@ namespace VSItemTooltips
             {
                 if (inGameUIFound)
                 {
-                    MelonLogger.Msg("Returned to main menu - resetting view caches");
                     inGameUIFound = false;
                     hudSearched = false;
                     hudInventory = null;
@@ -666,11 +590,7 @@ namespace VSItemTooltips
             if (itemFoundView == null)
                 itemFoundView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - ItemFound");
             if (arcanaView == null)
-            {
                 arcanaView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - ArcanaMainSelection");
-                if (arcanaView != null)
-                    MelonLogger.Msg("Found arcana view!");
-            }
 
             // Try multiple paths for pause view
             if (pauseView == null)
@@ -687,7 +607,6 @@ namespace VSItemTooltips
                     pauseView = UnityEngine.GameObject.Find(path);
                     if (pauseView != null)
                     {
-                        MelonLogger.Msg($"Found pause view at: {path}");
                         break;
                     }
                 }
@@ -699,15 +618,12 @@ namespace VSItemTooltips
                     var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
                     if (safeArea != null)
                     {
-                        MelonLogger.Msg("Searching Safe Area children for pause view:");
                         for (int i = 0; i < safeArea.transform.childCount; i++)
                         {
                             var child = safeArea.transform.GetChild(i);
-                            MelonLogger.Msg($"  Child: {child.name}");
                             if (child.name.ToLower().Contains("pause") || child.name.ToLower().Contains("map"))
                             {
                                 pauseView = child.gameObject;
-                                MelonLogger.Msg($"Found pause view: {child.name}");
                             }
                         }
                     }
@@ -738,14 +654,8 @@ namespace VSItemTooltips
                     hudInventory = UnityEngine.GameObject.Find(path);
                     if (hudInventory != null)
                     {
-                        MelonLogger.Msg($"Found HUD inventory at: {path}");
                         break;
                     }
-                }
-
-                if (hudInventory == null)
-                {
-                    MelonLogger.Msg("HUD inventory not found yet - will retry when game is paused");
                 }
             }
 
@@ -780,8 +690,6 @@ namespace VSItemTooltips
             {
                 activeUIContainers.Add(arcanaView.transform);
                 isPaused = true;
-                if (!wasGamePaused)
-                    MelonLogger.Msg("Arcana view detected as active!");
             }
 
             // Also check time scale as fallback, but ONLY if we're in an actual game run
@@ -791,8 +699,6 @@ namespace VSItemTooltips
                 // Log once when we detect pause via timeScale
                 if (!wasGamePaused)
                 {
-                    MelonLogger.Msg("Detected pause via timeScale=0, searching for pause UI...");
-
                     // Search for any active view that might be the pause screen
                     var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
                     if (safeArea != null)
@@ -802,7 +708,6 @@ namespace VSItemTooltips
                             var child = safeArea.transform.GetChild(i);
                             if (child.gameObject.activeInHierarchy)
                             {
-                                MelonLogger.Msg($"  Active view: {child.name}");
                                 // Add any active view as a container
                                 if (child.name.Contains("View") || child.name.Contains("Map") || child.name.Contains("Pause"))
                                 {
@@ -810,7 +715,6 @@ namespace VSItemTooltips
                                     if (pauseView == null && (child.name.ToLower().Contains("map") || child.name.ToLower().Contains("pause")))
                                     {
                                         pauseView = child.gameObject;
-                                        MelonLogger.Msg($"  Set as pauseView: {child.name}");
                                     }
                                 }
                             }
@@ -937,39 +841,9 @@ namespace VSItemTooltips
                 }
             }
 
-            // Log scan results once
             if (!loggedScanResults && totalImages > 0)
             {
                 loggedScanResults = true;
-                MelonLogger.Msg($"Scanned {totalImages} images, matched {matchedImages}, tracking {trackedIcons.Count} icons");
-
-                // Log a few sample sprite names to help debug
-                if (matchedImages == 0 && spriteToWeaponType != null && spriteToWeaponType.Count > 0)
-                {
-                    MelonLogger.Msg("Sample lookup keys (first 3):");
-                    int i = 0;
-                    foreach (var key in spriteToWeaponType.Keys)
-                    {
-                        if (i++ >= 3) break;
-                        MelonLogger.Msg($"  Lookup: '{key}'");
-                    }
-
-                    // Log some actual sprite names from the UI
-                    MelonLogger.Msg("Sample sprite names from UI (first 5):");
-                    i = 0;
-                    foreach (var container in activeUIContainers)
-                    {
-                        if (container == null) continue;
-                        var imgs = container.GetComponentsInChildren<UnityEngine.UI.Image>(false);
-                        foreach (var img in imgs)
-                        {
-                            if (img?.sprite != null && i++ < 5)
-                            {
-                                MelonLogger.Msg($"  Sprite: '{img.sprite.name}'");
-                            }
-                        }
-                    }
-                }
             }
 
             // Clean up stale entries
@@ -1047,24 +921,13 @@ namespace VSItemTooltips
             if (scannedPauseView) return;
             scannedPauseView = true;
 
-            MelonLogger.Msg("Scanning pause view for equipment icons...");
-
             // Find the EquipmentPanel
             var equipmentPanel = FindChildRecursive(pauseViewGo.transform, "EquipmentPanel");
-            if (equipmentPanel == null)
-            {
-                MelonLogger.Warning("EquipmentPanel not found!");
-                return;
-            }
-
-            MelonLogger.Msg($"Found EquipmentPanel with {equipmentPanel.childCount} children");
+            if (equipmentPanel == null) return;
 
             // Find WeaponsPanel and AccessoryPanel
             var weaponsPanel = equipmentPanel.Find("WeaponsPanel");
             var accessoryPanel = equipmentPanel.Find("AccessoryPanel");
-
-            MelonLogger.Msg($"WeaponsPanel: {(weaponsPanel != null ? $"{weaponsPanel.childCount} children" : "null")}");
-            MelonLogger.Msg($"AccessoryPanel: {(accessoryPanel != null ? $"{accessoryPanel.childCount} children" : "null")}");
 
             int weaponCount = 0;
             int accessoryCount = 0;
@@ -1079,7 +942,6 @@ namespace VSItemTooltips
                 accessoryCount = SetupEquipmentIconHovers(accessoryPanel, false);
             }
 
-            MelonLogger.Msg($"Added hovers to {weaponCount} weapons and {accessoryCount} accessories on pause screen");
         }
 
         private static int SetupEquipmentIconHovers(UnityEngine.Transform panel, bool isWeapons)
@@ -1104,24 +966,6 @@ namespace VSItemTooltips
                     // Skip Unity built-in components
                     if (compType.Namespace != null && compType.Namespace.StartsWith("UnityEngine")) continue;
 
-                    // Log component for debugging (first icon only)
-                    if (count == 0)
-                    {
-                        MelonLogger.Msg($"  Component on icon: {compType.FullName}");
-
-                        // List properties
-                        var props = compType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
-                        foreach (var prop in props.Take(10))
-                        {
-                            try
-                            {
-                                var val = prop.GetValue(comp);
-                                MelonLogger.Msg($"    {prop.Name}: {val}");
-                            }
-                            catch { }
-                        }
-                    }
-
                     // Try to get Type or WeaponType or ItemType property
                     var typeProp = compType.GetProperty("Type", BindingFlags.Public | BindingFlags.Instance);
                     if (typeProp != null)
@@ -1130,12 +974,10 @@ namespace VSItemTooltips
                         if (typeVal is WeaponType wt)
                         {
                             weaponType = wt;
-                            MelonLogger.Msg($"  Found weapon: {wt}");
                         }
                         else if (typeVal is ItemType it)
                         {
                             itemType = it;
-                            MelonLogger.Msg($"  Found accessory: {it}");
                         }
                     }
 
@@ -1295,8 +1137,9 @@ namespace VSItemTooltips
 
                 lookupTablesBuilt = spriteToWeaponType.Count > 0 || spriteToItemType.Count > 0;
 
-                if (lookupTablesBuilt)
+                if (lookupTablesBuilt && !loggedLookupTables)
                 {
+                    loggedLookupTables = true;
                     MelonLogger.Msg($"Built lookup tables: {spriteToWeaponType.Count} weapons, {spriteToItemType.Count} items");
                 }
             }
@@ -1308,22 +1151,15 @@ namespace VSItemTooltips
 
         private static void BuildWeaponLookup(object weaponsDict)
         {
-            MelonLogger.Msg("BuildWeaponLookup starting...");
             try
             {
                 // Get dictionary entries using reflection
                 var dictType = weaponsDict.GetType();
-                MelonLogger.Msg($"Dict type: {dictType.FullName}");
 
                 var keysProperty = dictType.GetProperty("Keys");
-                if (keysProperty == null)
-                {
-                    MelonLogger.Warning("Keys property not found!");
-                    return;
-                }
+                if (keysProperty == null) return;
 
                 var keys = keysProperty.GetValue(weaponsDict);
-                MelonLogger.Msg($"Keys type: {keys?.GetType().FullName ?? "null"}");
 
                 int count = 0;
                 var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
@@ -1365,7 +1201,6 @@ namespace VSItemTooltips
                         }
                     }
                 }
-                MelonLogger.Msg($"Iterated {count} weapon keys, added {spriteToWeaponType.Count} to lookup");
             }
             catch (Exception ex)
             {
@@ -1378,7 +1213,6 @@ namespace VSItemTooltips
             try
             {
                 var dictType = powerUpsDict.GetType();
-                MelonLogger.Msg($"PowerUp dict type: {dictType.Name}");
 
                 var keysProperty = dictType.GetProperty("Keys");
                 if (keysProperty == null) return;
@@ -1403,9 +1237,6 @@ namespace VSItemTooltips
                             {
                                 // Check if it's a List or single item
                                 var dataType = dataOrList.GetType();
-                                if (count == 1)
-                                    MelonLogger.Msg($"PowerUp value type: {dataType.Name}");
-
                                 // Try as List first
                                 var countProp = dataType.GetProperty("Count");
                                 if (countProp != null)
@@ -1428,7 +1259,6 @@ namespace VSItemTooltips
                         }
                     }
                 }
-                MelonLogger.Msg($"Iterated {count} powerup keys, added {spriteToItemType.Count} to lookup");
             }
             catch (Exception ex)
             {
@@ -1468,8 +1298,6 @@ namespace VSItemTooltips
         public static void CacheGameSession(object gameSession)
         {
             cachedGameSession = gameSession;
-            MelonLogger.Msg($"[CacheGameSession] Cached session: {gameSession?.GetType().Name}, cachedDataManager is null: {cachedDataManager == null}");
-
             // Also cache DataManager from the session if we don't have it yet
             if (cachedDataManager == null && gameSession != null)
             {
@@ -1485,18 +1313,9 @@ namespace VSItemTooltips
                         if (dataManager != null)
                         {
                             CacheDataManager(dataManager);
-                            MelonLogger.Msg("Also cached DataManager from GameSession.get_Data()");
                             return;
                         }
                     }
-
-                    // Log all methods to see what's available
-                    var allMethods = sessionType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                        .Where(m => m.Name.Contains("Data") || m.Name.Contains("get_"))
-                        .Select(m => m.Name)
-                        .Take(15)
-                        .ToList();
-                    MelonLogger.Msg($"[CacheGameSession] Session methods with Data/get_: {string.Join(", ", allMethods)}");
 
                     MelonLogger.Warning("[CacheGameSession] Could not find Data on GameSession");
                 }
@@ -1513,8 +1332,6 @@ namespace VSItemTooltips
         /// </summary>
         private static void TryFindGameSession()
         {
-            MelonLogger.Msg("[TryFindGameSession] Searching for game session...");
-
             try
             {
                 // Method 0: Try to find GameSessionData using Unity's FindObjectOfType
@@ -1529,8 +1346,6 @@ namespace VSItemTooltips
 
                         if (gameSessionType != null)
                         {
-                            MelonLogger.Msg($"[TryFindGameSession] Found GameSessionData type, trying FindObjectOfType...");
-
                             // Use reflection to call UnityEngine.Object.FindObjectOfType<GameSessionData>()
                             var findMethod = typeof(UnityEngine.Object).GetMethods()
                                 .FirstOrDefault(m => m.Name == "FindObjectOfType" && m.IsGenericMethod && m.GetParameters().Length == 0);
@@ -1546,22 +1361,14 @@ namespace VSItemTooltips
                                     if (charProp != null)
                                     {
                                         cachedGameSession = session;
-                                        MelonLogger.Msg($"[TryFindGameSession] Found via FindObjectOfType<GameSessionData>!");
                                         return;
                                     }
-                                }
-                                else
-                                {
-                                    MelonLogger.Msg($"[TryFindGameSession] FindObjectOfType<GameSessionData> returned null");
                                 }
                             }
                             break;
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        MelonLogger.Msg($"[TryFindGameSession] Error with FindObjectOfType: {ex.Message}");
-                    }
+                    catch { }
                 }
 
                 // Method 0.5: Try to find "Game" GameObject and get GameManager component
@@ -1571,19 +1378,15 @@ namespace VSItemTooltips
                     var gameObj = UnityEngine.GameObject.Find("Game");
                     if (gameObj != null)
                     {
-                        MelonLogger.Msg($"[TryFindGameSession] Found 'Game' GameObject");
-
                         // Get all components and look for GameManager
                         var components = gameObj.GetComponents<UnityEngine.Component>();
                         foreach (var comp in components)
                         {
                             if (comp == null) continue;
                             var compType = comp.GetType();
-                            MelonLogger.Msg($"[TryFindGameSession] Game component: {compType.Name}");
 
                             if (compType.Name.Contains("GameManager"))
                             {
-                                MelonLogger.Msg($"[TryFindGameSession] Found GameManager component!");
 
                                 // Try to get GameSessionData property
                                 var sessionProp = compType.GetProperty("GameSessionData", BindingFlags.Public | BindingFlags.Instance);
@@ -1592,37 +1395,18 @@ namespace VSItemTooltips
                                     var session = sessionProp.GetValue(comp);
                                     if (session != null)
                                     {
-                                        MelonLogger.Msg($"[TryFindGameSession] Got GameSessionData: {session.GetType().Name}");
                                         CacheGameSession(session);
 
                                         // Also try to get DataManager
                                         GenericIconPatches.TryCacheDataManagerFromGameManager(comp);
                                         return;
                                     }
-                                    else
-                                    {
-                                        MelonLogger.Msg($"[TryFindGameSession] GameSessionData property is null");
-                                    }
-                                }
-                                else
-                                {
-                                    // List available properties
-                                    var props = compType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                                        .Select(p => p.Name).Take(20).ToList();
-                                    MelonLogger.Msg($"[TryFindGameSession] GameManager properties: {string.Join(", ", props)}");
                                 }
                             }
                         }
                     }
-                    else
-                    {
-                        MelonLogger.Msg($"[TryFindGameSession] 'Game' GameObject not found");
-                    }
                 }
-                catch (Exception ex)
-                {
-                    MelonLogger.Msg($"[TryFindGameSession] Error finding Game object: {ex.Message}");
-                }
+                catch { }
 
                 // Method 1: Look for GameSessionData type with static Instance
                 foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
@@ -1651,7 +1435,6 @@ namespace VSItemTooltips
                                         if (activeCharProp != null)
                                         {
                                             cachedGameSession = instance;
-                                            MelonLogger.Msg($"[TryFindGameSession] Found via {sessionType.Name}.Instance");
                                             return;
                                         }
                                     }
@@ -1675,7 +1458,6 @@ namespace VSItemTooltips
                                         if (activeCharProp != null)
                                         {
                                             cachedGameSession = instance;
-                                            MelonLogger.Msg($"[TryFindGameSession] Found via {sessionType.Name}._instance");
                                             return;
                                         }
                                     }
@@ -1703,13 +1485,11 @@ namespace VSItemTooltips
                         if (comp == null) continue;
                         if (TryGetSessionFromComponent(comp))
                         {
-                            MelonLogger.Msg($"[TryFindGameSession] Found via component {comp.GetType().Name}");
                             return;
                         }
                     }
                 }
 
-                MelonLogger.Msg("[TryFindGameSession] Could not find game session");
             }
             catch (Exception ex)
             {
@@ -1742,7 +1522,6 @@ namespace VSItemTooltips
                             if (charProp != null)
                             {
                                 cachedGameSession = session;
-                                MelonLogger.Msg($"Found GameSession from {type.Name}.{name}");
                                 return true;
                             }
                         }
@@ -1758,7 +1537,6 @@ namespace VSItemTooltips
                             if (charProp != null)
                             {
                                 cachedGameSession = session;
-                                MelonLogger.Msg($"Found GameSession from {type.Name}.{name} field");
                                 return true;
                             }
                         }
@@ -1838,7 +1616,6 @@ namespace VSItemTooltips
                 if (countProp == null || indexer == null) return;
 
                 int count = (int)countProp.GetValue(equipList);
-                MelonLogger.Msg($"Found {count} {(isWeapons ? "weapons" : "accessories")} in player inventory");
 
                 // Find slot containers in HUD (look for children with slot-like names)
                 var slotContainer = hudInventory.transform.Find(isWeapons ? "Weapons" : "Accessories");
@@ -1872,12 +1649,10 @@ namespace VSItemTooltips
                     if (isWeapons && typeValue is WeaponType wt)
                     {
                         AddHoverToGameObject(targetGo, wt, null);
-                        MelonLogger.Msg($"Added HUD hover for weapon: {wt}");
                     }
                     else if (!isWeapons && typeValue is ItemType it)
                     {
                         AddHoverToGameObject(targetGo, null, it);
-                        MelonLogger.Msg($"Added HUD hover for item: {it}");
                     }
                 }
             }
@@ -1938,7 +1713,6 @@ namespace VSItemTooltips
                                     var val = prop.GetValue(instance);
                                     if (val != null)
                                     {
-                                        MelonLogger.Msg($"[Collection] Found DataManager via GameManager.{prop.Name}");
                                         CacheDataManager(val);
                                         return;
                                     }
@@ -1958,13 +1732,11 @@ namespace VSItemTooltips
                     var getWeaponsMethod = mb.GetType().GetMethod("GetConvertedWeapons");
                     if (getWeaponsMethod != null)
                     {
-                        MelonLogger.Msg($"[Collection] Found DataManager via MonoBehaviour: {mb.GetType().Name}");
                         CacheDataManager(mb);
                         return;
                     }
                 }
 
-                MelonLogger.Msg("[Collection] DataManager not found - popup will show Unknown");
             }
             catch (Exception ex)
             {
@@ -1977,37 +1749,22 @@ namespace VSItemTooltips
             if (dataManager == null) return;
 
             cachedDataManager = dataManager;
-            MelonLogger.Msg($"CacheDataManager called with: {dataManager.GetType().Name}");
 
             try
             {
                 var dmType = dataManager.GetType();
 
-                // List available methods for debugging
-                var methods = dmType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                    .Where(m => m.Name.Contains("Weapon") || m.Name.Contains("PowerUp") || m.Name.Contains("Item"))
-                    .Take(10);
-                foreach (var m in methods)
-                {
-                    MelonLogger.Msg($"  DataManager method: {m.Name}");
-                }
-
                 var getWeaponsMethod = dmType.GetMethod("GetConvertedWeapons");
                 var getPowerUpsMethod = dmType.GetMethod("GetConvertedPowerUpData");
-
-                MelonLogger.Msg($"GetConvertedWeapons: {(getWeaponsMethod != null ? "found" : "NOT FOUND")}");
-                MelonLogger.Msg($"GetConvertedPowerUpData: {(getPowerUpsMethod != null ? "found" : "NOT FOUND")}");
 
                 if (getWeaponsMethod != null)
                 {
                     cachedWeaponsDict = getWeaponsMethod.Invoke(dataManager, null);
-                    MelonLogger.Msg($"cachedWeaponsDict: {(cachedWeaponsDict != null ? cachedWeaponsDict.GetType().Name : "null")}");
                 }
 
                 if (getPowerUpsMethod != null)
                 {
                     cachedPowerUpsDict = getPowerUpsMethod.Invoke(dataManager, null);
-                    MelonLogger.Msg($"cachedPowerUpsDict: {(cachedPowerUpsDict != null ? cachedPowerUpsDict.GetType().Name : "null")}");
                 }
 
                 // Rebuild lookup tables with new data
@@ -2026,8 +1783,6 @@ namespace VSItemTooltips
 
         public static void ShowItemPopup(UnityEngine.Transform anchor, WeaponType? weaponType, ItemType? itemType)
         {
-            MelonLogger.Msg($"[ShowItemPopup] Called with weapon={weaponType}, item={itemType}");
-
             // If not in-game, route to collection popup system (for Collection screen clicks)
             if (!IsGamePaused())
             {
@@ -2254,16 +2009,12 @@ namespace VSItemTooltips
                 List<ArcanaInfo> activeArcanas = null;
                 if (weaponType.HasValue)
                 {
-                    MelonLogger.Msg($"[CreatePopup] Checking arcanas for weapon {weaponType.Value}");
                     activeArcanas = GetActiveArcanasForWeapon(weaponType.Value);
                 }
                 else if (itemType.HasValue)
                 {
-                    MelonLogger.Msg($"[CreatePopup] Checking arcanas for item {itemType.Value}");
                     activeArcanas = GetActiveArcanasForItem(itemType.Value);
                 }
-
-                MelonLogger.Msg($"[CreatePopup] Active arcanas found: {activeArcanas?.Count ?? 0}, cachedDataManager null: {cachedDataManager == null}, cachedGameManager null: {cachedGameManager == null}");
 
                 if (activeArcanas != null && activeArcanas.Count > 0)
                 {
@@ -2340,7 +2091,6 @@ namespace VSItemTooltips
         {
             if (cachedGameSession == null)
             {
-                MelonLogger.Msg($"[PlayerOwnsWeapon] cachedGameSession is null, can't check {weaponType}");
                 return false;
             }
 
@@ -2386,14 +2136,12 @@ namespace VSItemTooltips
                             string itemTypeStr = itemType.ToString();
                             if (itemTypeStr == searchStr)
                             {
-                                MelonLogger.Msg($"[PlayerOwnsWeapon] Player OWNS {weaponType}");
                                 return true;
                             }
                         }
                     }
                 }
 
-                MelonLogger.Msg($"[PlayerOwnsWeapon] Player does NOT own {weaponType} (checked {count} weapons)");
             }
             catch (Exception ex)
             {
@@ -2592,13 +2340,11 @@ namespace VSItemTooltips
 
             bool hasOwnEvolution = !string.IsNullOrEmpty(evoInto);
 
-            MelonLogger.Msg($"[AddWeaponEvo] {weaponType}: evoInto='{evoInto ?? "null"}', hasOwnEvolution={hasOwnEvolution}");
 
             // Check if this item is used as a passive requirement by OTHER weapons
             // This handles items like Empty Tome, Spinach, etc. that enable multiple evolutions
             // We do this REGARDLESS of whether the item has its own evoInto
             int passiveUseCount = CountPassiveUses(weaponType);
-            MelonLogger.Msg($"[AddWeaponEvo] {weaponType}: used as passive by {passiveUseCount} other weapons");
 
             if (passiveUseCount > 0)
             {
@@ -2700,7 +2446,6 @@ namespace VSItemTooltips
         {
             if (cachedWeaponsDict == null) return yOffset;
 
-            MelonLogger.Msg($"[AddPassiveEvo] Finding evolutions enabled by {passiveType}");
 
             var formulas = new System.Collections.Generic.List<EvolutionFormula>();
             string passiveTypeStr = passiveType.ToString();
@@ -2752,7 +2497,6 @@ namespace VSItemTooltips
                             {
                                 if (System.Enum.TryParse<WeaponType>(evoInto, out var evoType))
                                 {
-                                    MelonLogger.Msg($"[AddPassiveEvo] Found: {weaponType} + {passiveType} = {evoType}");
 
                                     var formula = new EvolutionFormula
                                     {
@@ -2794,7 +2538,6 @@ namespace VSItemTooltips
                 MelonLogger.Warning($"[AddPassiveEvo] Error: {ex.Message}");
             }
 
-            MelonLogger.Msg($"[AddPassiveEvo] {passiveType}: found {formulas.Count} unique formulas");
 
             if (formulas.Count == 0) return yOffset;
 
@@ -2883,11 +2626,9 @@ namespace VSItemTooltips
             // For items/powerups, find ALL weapons that use this item to evolve
             if (cachedWeaponsDict == null)
             {
-                MelonLogger.Msg($"[AddItemEvo] cachedWeaponsDict is null for {itemType}");
                 return yOffset;
             }
 
-            MelonLogger.Msg($"[AddItemEvo] Finding evolutions for {itemType} (looking for synergy match: '{itemType.ToString()}')");
 
             var formulas = new System.Collections.Generic.List<EvolutionFormula>();
             int weaponsChecked = 0;
@@ -2932,7 +2673,6 @@ namespace VSItemTooltips
                                 {
                                     synergyContents += synergy[s].ToString() + " ";
                                 }
-                                MelonLogger.Msg($"[AddItemEvo] {weaponType} evoSynergy: [{synergyContents}] -> {evoIntoCheck}");
                             }
 
                             // Check if this item type is in the synergy list
@@ -2955,7 +2695,6 @@ namespace VSItemTooltips
 
                                 if (System.Enum.TryParse<WeaponType>(evoInto, out var evoType))
                                 {
-                                    MelonLogger.Msg($"[AddItemEvo] Found: {weaponType} + {itemType} = {evoType}");
 
                                     var formula = new EvolutionFormula
                                     {
@@ -2997,7 +2736,6 @@ namespace VSItemTooltips
                 MelonLogger.Warning($"[AddItemEvo] Error: {ex.Message}");
             }
 
-            MelonLogger.Msg($"[AddItemEvo] {itemType}: checked {weaponsChecked} weapons, found {matchesFound} matches, {formulas.Count} unique formulas");
 
             if (formulas.Count == 0) return yOffset;
 
@@ -3307,33 +3045,9 @@ namespace VSItemTooltips
                     yOffset -= descHeight + Spacing;
                 }
 
-                // Dump all properties/fields on arcana data to find additional lists
-                try
-                {
-                    var allProps = arcanaData.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    foreach (var p in allProps)
-                    {
-                        try
-                        {
-                            var val = p.GetValue(arcanaData);
-                            var countP = val?.GetType()?.GetProperty("Count");
-                            string extra = countP != null ? $" (Count={countP.GetValue(val)})" : "";
-                            MelonLogger.Msg($"[ArcanaData] Property: {p.Name} = {val}{extra} [{p.PropertyType.Name}]");
-                        }
-                        catch { MelonLogger.Msg($"[ArcanaData] Property: {p.Name} [error reading]"); }
-                    }
-                }
-                catch { }
-
                 // "Affects:" section with grid of all affected items
                 var affectedWeapons = GetAllArcanaAffectedWeaponTypes(arcanaData);
                 var affectedItems = GetAllArcanaAffectedItemTypes(arcanaData);
-                MelonLogger.Msg($"[ArcanaPopup] '{arcanaName}' affects {affectedWeapons.Count} weapons, {affectedItems.Count} items");
-                if (affectedWeapons.Count > 0)
-                    MelonLogger.Msg($"[ArcanaPopup] Weapons: {string.Join(", ", affectedWeapons)}");
-                if (affectedItems.Count > 0)
-                    MelonLogger.Msg($"[ArcanaPopup] Items: {string.Join(", ", affectedItems)}");
-
                 int totalAffected = affectedWeapons.Count + affectedItems.Count;
                 if (totalAffected > 0)
                 {
@@ -3829,10 +3543,6 @@ namespace VSItemTooltips
             {
                 // For "Add" methods (like AddAffectedWeapon), the icon was just created as the last child
                 iconGo = FindLastImageChild(go);
-                if (iconGo != null)
-                {
-                    MelonLogger.Msg($"  Found last child icon: {iconGo.name}");
-                }
             }
             else
             {
@@ -3843,13 +3553,11 @@ namespace VSItemTooltips
             if (iconGo != null)
             {
                 AddHoverToGameObject(iconGo, type, null);
-                MelonLogger.Msg($"Registered weapon UI icon: {type}");
             }
             else
             {
                 // Fallback to whole card if icon not found
                 AddHoverToGameObject(go, type, null);
-                MelonLogger.Msg($"Registered weapon UI (whole card): {type}");
             }
         }
 
@@ -3889,7 +3597,6 @@ namespace VSItemTooltips
                 var img = child.GetComponent<UnityEngine.UI.Image>();
                 if (img != null && img.sprite != null)
                 {
-                    MelonLogger.Msg($"  Found icon: {child.name} (depth {depth})");
                     return child.gameObject;
                 }
             }
@@ -3916,10 +3623,6 @@ namespace VSItemTooltips
             if (isAddMethod)
             {
                 iconGo = FindLastImageChild(go);
-                if (iconGo != null)
-                {
-                    MelonLogger.Msg($"  Found last child icon: {iconGo.name}");
-                }
             }
             else
             {
@@ -3929,12 +3632,10 @@ namespace VSItemTooltips
             if (iconGo != null)
             {
                 AddHoverToGameObject(iconGo, null, type);
-                MelonLogger.Msg($"Registered item UI icon: {type}");
             }
             else
             {
                 AddHoverToGameObject(go, null, type);
-                MelonLogger.Msg($"Registered item UI (whole card): {type}");
             }
         }
 
@@ -3946,7 +3647,6 @@ namespace VSItemTooltips
             if (!IsUnderGameUI(go.transform))
             {
                 collectionIcons[instanceId] = (go, null, null, arcanaType);
-                MelonLogger.Msg($"Registered arcana collection icon: {arcanaType} on {go.name}");
                 return;
             }
         }
@@ -3991,7 +3691,6 @@ namespace VSItemTooltips
                 // Log what we found for debugging
                 if (images.Length > 0)
                 {
-                    MelonLogger.Msg($"  Potential icon: '{img.gameObject.name}'");
                 }
 
                 return img.gameObject;
@@ -4006,7 +3705,6 @@ namespace VSItemTooltips
             var existing = go.GetComponent<UnityEngine.EventSystems.EventTrigger>();
             if (existing != null)
             {
-                MelonLogger.Msg($"  Skipping hover (already has trigger): {go.name}");
                 return;
             }
 
@@ -4182,7 +3880,6 @@ namespace VSItemTooltips
                         {
                             if (!spriteManagerDebugLogged)
                             {
-                                MelonLogger.Msg($"[LoadSpriteFromAtlas] Found SpriteManager in {assembly.GetName().Name}");
                                 spriteManagerDebugLogged = true;
                             }
                             break;
@@ -4230,7 +3927,6 @@ namespace VSItemTooltips
             {
                 if (!spriteLoadDebugLogged)
                 {
-                    MelonLogger.Msg($"[GetSpriteForWeapon] {weaponType}: data is null");
                 }
                 return null;
             }
@@ -4243,7 +3939,6 @@ namespace VSItemTooltips
 
                 if (!spriteLoadDebugLogged)
                 {
-                    MelonLogger.Msg($"[GetSpriteForWeapon] {weaponType}: frame={frameName ?? "null"}, atlas={atlasName ?? "null"}");
                     spriteLoadDebugLogged = true;
                 }
 
@@ -4426,7 +4121,6 @@ namespace VSItemTooltips
                                         rawValues.Add($"not_il2cpp:{w}");
                                     }
                                 }
-                                MelonLogger.Msg($"[Arcana] {arcName} RAW weapons ({wCount}): {string.Join(", ", rawValues)}");
                             }
                         }
 
@@ -4466,7 +4160,6 @@ namespace VSItemTooltips
                                         rawValues.Add($"not_il2cpp:{item}");
                                     }
                                 }
-                                MelonLogger.Msg($"[Arcana] {arcName} RAW items ({iCount}): {string.Join(", ", rawValues)}");
                             }
                         }
                     }
@@ -4487,7 +4180,6 @@ namespace VSItemTooltips
                         activeArcanasList = prop.GetValue(arcanaMgr);
                         if (activeArcanasList != null)
                         {
-                            MelonLogger.Msg($"[Arcana] Found active arcanas via property: {propName}");
                             break;
                         }
                     }
@@ -4497,7 +4189,6 @@ namespace VSItemTooltips
                         activeArcanasList = field.GetValue(arcanaMgr);
                         if (activeArcanasList != null)
                         {
-                            MelonLogger.Msg($"[Arcana] Found active arcanas via field: {propName}");
                             break;
                         }
                     }
@@ -4511,7 +4202,6 @@ namespace VSItemTooltips
                     if (countProp != null && itemProp != null)
                     {
                         int count = (int)countProp.GetValue(activeArcanasList);
-                        MelonLogger.Msg($"[Arcana] Active arcanas count: {count}");
                         for (int i = 0; i < count; i++)
                         {
                             var arcana = itemProp.GetValue(activeArcanasList, new object[] { i });
@@ -4847,7 +4537,6 @@ namespace VSItemTooltips
 
             try
             {
-                MelonLogger.Msg($"[Arcana] Scanning UI for arcana: {arcanaName}");
 
                 // Find TextMeshProUGUI components with the arcana's name
                 var allTmps = UnityEngine.Object.FindObjectsOfType<Il2CppTMPro.TextMeshProUGUI>();
@@ -4881,12 +4570,10 @@ namespace VSItemTooltips
                         tmpText.Contains("gemini") || cleanText.Contains("gemini") ||
                         tmpText.Contains("arcana") || tmpText.Contains("Arcana"))
                     {
-                        MelonLogger.Msg($"[Arcana] TMP candidate: '{tmpText}' (clean: '{cleanText}') on {tmp.gameObject.name}, match={isMatch}");
                     }
 
                     if (isMatch)
                     {
-                        MelonLogger.Msg($"[Arcana] Text match found: '{tmpText}' on {tmp.gameObject.name}");
 
                         // Walk up to find the card container (try several levels)
                         var candidate = tmp.transform.parent;
@@ -4894,11 +4581,9 @@ namespace VSItemTooltips
                         {
                             // Check if this container has many Image children (the icon grid)
                             var childImages = candidate.GetComponentsInChildren<UnityEngine.UI.Image>();
-                            MelonLogger.Msg($"[Arcana]   depth {depth}: {candidate.name} has {childImages.Length} images");
                             if (childImages.Length >= 10)
                             {
                                 cardContainer = candidate;
-                                MelonLogger.Msg($"[Arcana] Found card container: {candidate.name} with {childImages.Length} images (depth {depth})");
                                 break;
                             }
                             candidate = candidate.parent;
@@ -4907,11 +4592,9 @@ namespace VSItemTooltips
                     }
                 }
 
-                MelonLogger.Msg($"[Arcana] Scanned {tmpCount} TMP elements, searching for '{searchName}' / '{shortName}'");
 
                 if (cardContainer == null)
                 {
-                    MelonLogger.Msg($"[Arcana] Could not find arcana card UI for: {arcanaName}");
                     return;
                 }
 
@@ -4940,7 +4623,6 @@ namespace VSItemTooltips
                         items.Add(it2);
                 }
 
-                MelonLogger.Msg($"[Arcana] UI scan for {arcanaName}: {weapons.Count} weapons, {items.Count} items");
 
                 if (weapons.Count > 0 || items.Count > 0)
                 {
@@ -5036,7 +4718,6 @@ namespace VSItemTooltips
             try
             {
                 panelCapturedWeapons.Add(weaponType);
-                MelonLogger.Msg($"[Arcana] Captured affected weapon from panel: {weaponType}");
             }
             catch (Exception ex)
             {
@@ -5049,7 +4730,6 @@ namespace VSItemTooltips
             try
             {
                 panelCapturedItems.Add(itemType);
-                MelonLogger.Msg($"[Arcana] Captured affected item from panel: {itemType}");
             }
             catch (Exception ex)
             {
@@ -5077,7 +4757,6 @@ namespace VSItemTooltips
                     var arcanaData = GetArcanaData(arcanaType);
                     if (arcanaData == null)
                     {
-                        MelonLogger.Msg($"[Arcana] arcanaData is null for arcanaType {arcanaType}");
                         continue;
                     }
 
@@ -5090,7 +4769,6 @@ namespace VSItemTooltips
                     if (arcanaTypeInt >= 0 && !string.IsNullOrEmpty(arcanaName))
                         arcanaNameToInt[arcanaName] = arcanaTypeInt;
 
-                    MelonLogger.Msg($"[Arcana] Checking {arcanaName} (int={arcanaTypeInt}) for weapon {weaponType} (int={(int)weaponType})");
 
                     // Check static data first, then panel capture, then UI scan
                     bool affectedStatic = IsWeaponAffectedByArcana(weaponType, arcanaData);
@@ -5130,7 +4808,6 @@ namespace VSItemTooltips
                         ArcanaType = arcanaType
                     });
 
-                    MelonLogger.Msg($"[Arcana] Weapon {weaponType} affected by arcana: {name}");
                 }
             }
             catch (Exception ex)
@@ -5196,7 +4873,6 @@ namespace VSItemTooltips
                         ArcanaType = arcanaType
                     });
 
-                    MelonLogger.Msg($"[Arcana] Item {itemType} affected by arcana: {name}");
                 }
             }
             catch (Exception ex)
@@ -5215,20 +4891,12 @@ namespace VSItemTooltips
     {
         public static void Show_Postfix(LevelUpPage __instance)
         {
-            MelonLogger.Msg("LevelUpPage.Show postfix fired!");
             try
             {
-                MelonLogger.Msg($"Instance type: {__instance?.GetType().Name ?? "null"}");
                 var dataManager = __instance.Data;
-                MelonLogger.Msg($"DataManager: {(dataManager != null ? dataManager.GetType().Name : "null")}");
                 if (dataManager != null)
                 {
                     ItemTooltipsMod.CacheDataManager(dataManager);
-                    MelonLogger.Msg("Cached DataManager from LevelUpPage");
-                }
-                else
-                {
-                    MelonLogger.Warning("DataManager was null!");
                 }
 
                 // Try to find and cache the game session
@@ -5246,20 +4914,6 @@ namespace VSItemTooltips
 
             var pageType = page.GetType();
 
-            // Log all properties for debugging
-            var allProps = pageType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                .Select(p => $"{p.Name}({p.PropertyType.Name})")
-                .Take(15)
-                .ToList();
-            MelonLogger.Msg($"LevelUpPage properties: {string.Join(", ", allProps)}");
-
-            // Also log fields
-            var allFields = pageType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                .Select(f => $"{f.Name}({f.FieldType.Name})")
-                .Take(15)
-                .ToList();
-            MelonLogger.Msg($"LevelUpPage fields: {string.Join(", ", allFields)}");
-
             // Try various property/field names for game session
             string[] sessionNames = { "_gameSession", "GameSession", "gameSession", "_session", "Session" };
 
@@ -5275,7 +4929,6 @@ namespace VSItemTooltips
                         if (session != null && ValidateGameSession(session))
                         {
                             ItemTooltipsMod.CacheGameSession(session);
-                            MelonLogger.Msg($"Cached GameSession from LevelUpPage.{name} property");
                             return;
                         }
                     }
@@ -5295,7 +4948,6 @@ namespace VSItemTooltips
                         if (session != null && ValidateGameSession(session))
                         {
                             ItemTooltipsMod.CacheGameSession(session);
-                            MelonLogger.Msg($"Cached GameSession from LevelUpPage.{name} field");
                             return;
                         }
                     }
@@ -5317,7 +4969,6 @@ namespace VSItemTooltips
                         if (value != null && ValidateGameSession(value))
                         {
                             ItemTooltipsMod.CacheGameSession(value);
-                            MelonLogger.Msg($"Cached GameSession from LevelUpPage.{prop.Name}");
                             return;
                         }
                     }
@@ -5347,7 +4998,6 @@ namespace VSItemTooltips
                 if (dataManager != null)
                 {
                     ItemTooltipsMod.CacheDataManager(dataManager);
-                    MelonLogger.Msg($"Cached DataManager from {__instance.GetType().Name}");
                 }
             }
             catch (Exception ex)
@@ -5415,7 +5065,6 @@ namespace VSItemTooltips
                     // For "Add" methods (like AddAffectedWeapon), the icon is a newly created child
                     bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
                     ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, __0, isAddMethod);
-                    MelonLogger.Msg($"Auto-registered weapon icon: {__0} on {go.name}");
                 }
             }
             catch (Exception ex)
@@ -5439,7 +5088,6 @@ namespace VSItemTooltips
                 {
                     bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
                     ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, __0, isAddMethod);
-                    MelonLogger.Msg($"Auto-registered item icon: {__0} on {go.name}");
                 }
             }
             catch (Exception ex)
@@ -5471,7 +5119,6 @@ namespace VSItemTooltips
                 {
                     bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
                     ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, __1, isAddMethod);
-                    MelonLogger.Msg($"Auto-registered weapon icon (arg1): {__1} on {go.name}");
                 }
             }
             catch (Exception ex)
@@ -5503,7 +5150,6 @@ namespace VSItemTooltips
                 {
                     bool isAddMethod = __originalMethod?.Name?.Contains("Add") ?? false;
                     ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, __1, isAddMethod);
-                    MelonLogger.Msg($"Auto-registered item icon (arg1): {__1} on {go.name}");
                 }
             }
             catch (Exception ex)
@@ -5542,7 +5188,6 @@ namespace VSItemTooltips
                 if (foundType.HasValue)
                 {
                     ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, foundType.Value, isAddMethod);
-                    MelonLogger.Msg($"Auto-registered weapon icon (argN): {foundType.Value} on {go.name}");
                 }
             }
             catch (Exception ex)
@@ -5581,7 +5226,6 @@ namespace VSItemTooltips
                 if (foundType.HasValue)
                 {
                     ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, foundType.Value, isAddMethod);
-                    MelonLogger.Msg($"Auto-registered item icon (argN): {foundType.Value} on {go.name}");
                     return;
                 }
             }
@@ -5607,7 +5251,6 @@ namespace VSItemTooltips
                     if (arg != null && arg.GetType() == arcanaEnum)
                     {
                         ItemTooltipsMod.RegisterArcanaUI(go.GetInstanceID(), go, arg);
-                        MelonLogger.Msg($"Auto-registered arcana icon (argN): {arg} on {go.name}");
                         return;
                     }
                 }
@@ -5631,7 +5274,6 @@ namespace VSItemTooltips
             // Check if this arg is a DataManager (has GetConvertedWeapons method)
             if (!ItemTooltipsMod.HasCachedDataManager() && argType.GetMethod("GetConvertedWeapons") != null)
             {
-                MelonLogger.Msg($"Found DataManager in patch arg: {argType.Name}");
                 ItemTooltipsMod.CacheDataManager(arg);
                 return;
             }
@@ -5665,7 +5307,6 @@ namespace VSItemTooltips
                             if (charProp != null)
                             {
                                 ItemTooltipsMod.CacheGameSession(session);
-                                MelonLogger.Msg($"Cached GameSession from {argType.Name}.{name}");
                                 return;
                             }
                         }
@@ -5685,7 +5326,6 @@ namespace VSItemTooltips
                             if (charProp != null)
                             {
                                 ItemTooltipsMod.CacheGameSession(session);
-                                MelonLogger.Msg($"Cached GameSession from {argType.Name}.{name} field");
                                 return;
                             }
                         }
@@ -5707,7 +5347,6 @@ namespace VSItemTooltips
                             var dm = prop.GetValue(arg);
                             if (dm != null)
                             {
-                                MelonLogger.Msg($"Found DataManager on {argType.Name}.{prop.Name}");
                                 ItemTooltipsMod.CacheDataManager(dm);
                                 return;
                             }
@@ -5726,7 +5365,6 @@ namespace VSItemTooltips
                             var dm = field.GetValue(arg);
                             if (dm != null)
                             {
-                                MelonLogger.Msg($"Found DataManager on {argType.Name}.{field.Name} field");
                                 ItemTooltipsMod.CacheDataManager(dm);
                                 return;
                             }
@@ -5746,7 +5384,6 @@ namespace VSItemTooltips
             if (character == null) return;
 
             var charType = character.GetType();
-            MelonLogger.Msg($"[TryCacheSessionFromCharacter] Checking {charType.Name}...");
 
             try
             {
@@ -5757,7 +5394,6 @@ namespace VSItemTooltips
                 var gameManager = gameManagerProp.GetValue(character);
                 if (gameManager == null) return;
 
-                MelonLogger.Msg($"[TryCacheSessionFromCharacter] Got _gameManager: {gameManager.GetType().Name}");
 
                 // Try to get GameSession directly from GameManager first
                 if (TryGetSessionFromObject(gameManager, "GameManager"))
@@ -5770,7 +5406,6 @@ namespace VSItemTooltips
                     var stage = stageProp.GetValue(gameManager);
                     if (stage != null)
                     {
-                        MelonLogger.Msg($"[TryCacheSessionFromCharacter] Got _stage: {stage.GetType().Name}");
                         if (TryGetSessionFromObject(stage, "Stage"))
                             return;
 
@@ -5779,7 +5414,6 @@ namespace VSItemTooltips
                             .Select(p => p.Name)
                             .Take(20)
                             .ToList();
-                        MelonLogger.Msg($"[TryCacheSessionFromCharacter] Stage props: {string.Join(", ", stageProps)}");
                     }
                 }
 
@@ -5790,7 +5424,6 @@ namespace VSItemTooltips
                     var advManager = advProp.GetValue(gameManager);
                     if (advManager != null)
                     {
-                        MelonLogger.Msg($"[TryCacheSessionFromCharacter] Got _adventureManager: {advManager.GetType().Name}");
                         if (TryGetSessionFromObject(advManager, "AdventureManager"))
                             return;
                     }
@@ -5828,7 +5461,6 @@ namespace VSItemTooltips
                             if (activeCharProp != null)
                             {
                                 ItemTooltipsMod.CacheGameSession(session);
-                                MelonLogger.Msg($"[TryCacheSession] Found via {objName}.{name}!");
                                 return true;
                             }
                         }
@@ -5848,7 +5480,6 @@ namespace VSItemTooltips
             if (ItemTooltipsMod.HasCachedDataManager()) return;
 
             var gmType = gameManager.GetType();
-            MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Checking GameManager for DataManager...");
 
             // Try "Data" property first (what UnityExplorer shows)
             string[] dataNames = { "Data", "_data", "DataManager", "_dataManager" };
@@ -5863,11 +5494,9 @@ namespace VSItemTooltips
                         var dm = prop.GetValue(gameManager);
                         if (dm != null)
                         {
-                            MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Found {name} property: {dm.GetType().Name}");
                             if (dm.GetType().Name.Contains("DataManager"))
                             {
                                 ItemTooltipsMod.CacheDataManager(dm);
-                                MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Cached DataManager from GameManager.{name}!");
                                 return;
                             }
                         }
@@ -5880,11 +5509,9 @@ namespace VSItemTooltips
                         var dm = getMethod.Invoke(gameManager, null);
                         if (dm != null)
                         {
-                            MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Found get_{name}(): {dm.GetType().Name}");
                             if (dm.GetType().Name.Contains("DataManager"))
                             {
                                 ItemTooltipsMod.CacheDataManager(dm);
-                                MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Cached DataManager from GameManager.get_{name}()!");
                                 return;
                             }
                         }
@@ -5892,14 +5519,12 @@ namespace VSItemTooltips
                 }
                 catch (Exception ex)
                 {
-                    MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Error with {name}: {ex.Message}");
                 }
             }
 
             // List available properties for debugging
             var props = gmType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
                 .Select(p => p.Name).Take(25).ToList();
-            MelonLogger.Msg($"[TryCacheDataManagerFromGameManager] Available properties: {string.Join(", ", props)}");
         }
 
         /// <summary>
@@ -5921,7 +5546,6 @@ namespace VSItemTooltips
                         if (dm != null && dm.GetType().Name.Contains("DataManager"))
                         {
                             ItemTooltipsMod.CacheDataManager(dm);
-                            MelonLogger.Msg($"[TryCacheDataManager] Found via {objName}.{name}!");
                             return;
                         }
                     }
@@ -5959,12 +5583,10 @@ namespace VSItemTooltips
                     if (typeVal is WeaponType wt)
                     {
                         ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, wt);
-                        MelonLogger.Msg($"Registered pause icon weapon: {wt}");
                     }
                     else if (typeVal is ItemType it)
                     {
                         ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, it);
-                        MelonLogger.Msg($"Registered pause icon item: {it}");
                     }
                 }
 
@@ -5976,7 +5598,6 @@ namespace VSItemTooltips
                     if (val is WeaponType wt)
                     {
                         ItemTooltipsMod.RegisterWeaponUI(go.GetInstanceID(), go, wt);
-                        MelonLogger.Msg($"Registered pause icon weapon (field): {wt}");
                     }
                 }
 
@@ -5987,7 +5608,6 @@ namespace VSItemTooltips
                     if (val is ItemType it)
                     {
                         ItemTooltipsMod.RegisterItemUI(go.GetInstanceID(), go, it);
-                        MelonLogger.Msg($"Registered pause icon item (field): {it}");
                     }
                 }
             }
@@ -6089,7 +5709,6 @@ namespace VSItemTooltips
                             if (charProp != null)
                             {
                                 ItemTooltipsMod.CacheGameSession(session);
-                                MelonLogger.Msg($"Cached GameSession from {pageType.Name}.{name} property");
                                 return;
                             }
                         }
@@ -6106,7 +5725,6 @@ namespace VSItemTooltips
                             if (charProp != null)
                             {
                                 ItemTooltipsMod.CacheGameSession(session);
-                                MelonLogger.Msg($"Cached GameSession from {pageType.Name}.{name} field");
                                 return;
                             }
                         }
@@ -6119,7 +5737,6 @@ namespace VSItemTooltips
                 if (directCharProp != null)
                 {
                     ItemTooltipsMod.CacheGameSession(page);
-                    MelonLogger.Msg($"Cached {pageType.Name} as GameSession (has ActiveCharacter)");
                     return;
                 }
 
@@ -6128,7 +5745,6 @@ namespace VSItemTooltips
                     .Select(p => p.Name)
                     .Take(10)
                     .ToList();
-                MelonLogger.Msg($"  {pageType.Name} properties: {string.Join(", ", allProps)}...");
             }
             catch (Exception ex)
             {
