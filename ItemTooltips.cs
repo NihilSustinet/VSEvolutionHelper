@@ -9,7 +9,7 @@ using Il2CppVampireSurvivors.Data.Weapons;
 using Il2CppVampireSurvivors.Objects;
 using Il2CppVampireSurvivors.UI;
 
-[assembly: MelonInfo(typeof(VSItemTooltips.ItemTooltipsMod), "VS Item Tooltips", "1.0.0", "Nihil")]
+[assembly: MelonInfo(typeof(VSItemTooltips.ItemTooltipsMod), "VS Item Tooltips", "1.1.2", "NihilXD")]
 [assembly: MelonGame("poncle", "Vampire Survivors")]
 
 namespace VSItemTooltips
@@ -2292,6 +2292,7 @@ namespace VSItemTooltips
             public ItemType? ItemType;
             public UnityEngine.Sprite Sprite;
             public bool Owned;
+            public bool RequiresMaxLevel;
         }
 
         // Structure to hold evolution formula data
@@ -2308,7 +2309,8 @@ namespace VSItemTooltips
 
         // Collect all passive requirements from an evoSynergy array
         private static System.Collections.Generic.List<PassiveRequirement> CollectPassiveRequirements(
-            Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType> evoSynergy)
+            Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType> evoSynergy,
+            System.Collections.Generic.HashSet<int> requiresMaxTypes = null)
         {
             var passives = new System.Collections.Generic.List<PassiveRequirement>();
             if (evoSynergy == null) return passives;
@@ -2317,6 +2319,7 @@ namespace VSItemTooltips
             {
                 var reqType = evoSynergy[i];
                 var passive = new PassiveRequirement();
+                passive.RequiresMaxLevel = requiresMaxTypes != null && requiresMaxTypes.Contains((int)reqType);
 
                 var reqData = GetWeaponData(reqType);
                 if (reqData != null)
@@ -2342,6 +2345,52 @@ namespace VSItemTooltips
                 passives.Add(passive);
             }
             return passives;
+        }
+
+        /// <summary>
+        /// Reads the 'requiresMax' list from a WeaponData object and returns a set of WeaponType int values.
+        /// </summary>
+        /// <summary>
+        /// Reads 'requiresMax' from the evolved weapon's data and returns a set of WeaponType int values
+        /// indicating which synergy passives need to be at max level.
+        /// </summary>
+        private static System.Collections.Generic.HashSet<int> GetRequiresMaxFromEvolved(string evoInto)
+        {
+            if (string.IsNullOrEmpty(evoInto)) return null;
+            if (!System.Enum.TryParse<WeaponType>(evoInto, out var evoType)) return null;
+
+            var evoData = GetWeaponData(evoType);
+            if (evoData == null) return null;
+
+            try
+            {
+                var prop = evoData.GetType().GetProperty("requiresMax", BindingFlags.Public | BindingFlags.Instance);
+                if (prop == null) return null;
+
+                var list = prop.GetValue(evoData);
+                if (list == null) return null;
+
+                var countProp = list.GetType().GetProperty("Count");
+                if (countProp == null) return null;
+                int count = (int)countProp.GetValue(list);
+                if (count == 0) return null;
+
+                var indexer = list.GetType().GetProperty("Item");
+                if (indexer == null) return null;
+
+                var result = new System.Collections.Generic.HashSet<int>();
+                for (int i = 0; i < count; i++)
+                {
+                    var item = indexer.GetValue(list, new object[] { i });
+                    if (item is WeaponType wt)
+                        result.Add((int)wt);
+                    else if (item != null)
+                        result.Add((int)item);
+                }
+                return result.Count > 0 ? result : null;
+            }
+            catch { }
+            return null;
         }
 
         // Check if player owns a weapon
@@ -2694,7 +2743,8 @@ namespace VSItemTooltips
             bool ownsWeapon = PlayerOwnsWeapon(weaponType);
 
             // Collect ALL passive requirements from evoSynergy
-            var passiveRequirements = CollectPassiveRequirements(evoSynergy);
+            var requiresMaxTypes = GetRequiresMaxFromEvolved(evoInto);
+            var passiveRequirements = CollectPassiveRequirements(evoSynergy, requiresMaxTypes);
 
             // Add section header
             yOffset -= Spacing;
@@ -2711,7 +2761,8 @@ namespace VSItemTooltips
             // Create formula row: + [Passive1] + [Passive2] → [Evolved]
             // The base weapon is already shown in the header
             float iconSize = 38f;
-            float rowHeight = iconSize + 8f;
+            bool hasMaxReq = passiveRequirements.Exists(p => p.RequiresMaxLevel);
+            float rowHeight = iconSize + 8f + (hasMaxReq ? 12f : 0f);
             float xOffset = Padding + 5f;
 
             // Render each passive requirement with a plus sign
@@ -2736,6 +2787,22 @@ namespace VSItemTooltips
                     AddHoverToGameObject(passiveIcon, passive.WeaponType.Value, null, useClick: true);
                 else if (passive.ItemType.HasValue)
                     AddHoverToGameObject(passiveIcon, null, passive.ItemType.Value, useClick: true);
+
+                // "MAX" label below passive icon if required
+                if (passive.RequiresMaxLevel)
+                {
+                    var maxObj = CreateTextElement(parent, $"Max{i}", "MAX", font, 9f,
+                        new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                    var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
+                    maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                    maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                    maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
+                    maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
+                    maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
+                    var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
+                    if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                }
+
                 xOffset += iconSize + 4f;
             }
 
@@ -2805,7 +2872,7 @@ namespace VSItemTooltips
                             foundFormula = new EvolutionFormula
                             {
                                 BaseWeapon = weaponType,
-                                Passives = CollectPassiveRequirements(synergy),
+                                Passives = CollectPassiveRequirements(synergy, GetRequiresMaxFromEvolved(evoInto)),
                                 EvolvedWeapon = evolvedType,
                                 BaseName = GetLocalizedWeaponName(weaponData, weaponType),
                                 BaseSprite = GetSpriteForWeapon(weaponType),
@@ -2838,7 +2905,8 @@ namespace VSItemTooltips
 
             // Create formula row: [Base Weapon] + [Passive1] + [Passive2]
             float iconSize = 36f;
-            float rowHeight = iconSize + 4f;
+            bool hasMaxReqRow = formula.Passives != null && formula.Passives.Exists(p => p.RequiresMaxLevel);
+            float rowHeight = iconSize + 4f + (hasMaxReqRow ? 12f : 0f);
             float xOffset = Padding + 5f;
 
             // Base weapon icon
@@ -2871,6 +2939,22 @@ namespace VSItemTooltips
                         AddHoverToGameObject(passiveIcon, passive.WeaponType.Value, null, useClick: true);
                     else if (passive.ItemType.HasValue)
                         AddHoverToGameObject(passiveIcon, null, passive.ItemType.Value, useClick: true);
+
+                    // "MAX" label below passive icon if required
+                    if (passive.RequiresMaxLevel)
+                    {
+                        var maxObj = CreateTextElement(parent, $"EvolvedFromMax{p}", "MAX", font, 9f,
+                            new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                        var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
+                        maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                        maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                        maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
+                        maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
+                        maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
+                        var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
+                        if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                    }
+
                     xOffset += iconSize + 3f;
                 }
             }
@@ -2941,7 +3025,7 @@ namespace VSItemTooltips
                                     var formula = new EvolutionFormula
                                     {
                                         BaseWeapon = weaponType,
-                                        Passives = CollectPassiveRequirements(synergy),
+                                        Passives = CollectPassiveRequirements(synergy, GetRequiresMaxFromEvolved(evoInto)),
                                         EvolvedWeapon = evoType,
                                         BaseName = GetLocalizedWeaponName(weaponData, weaponType),
                                         BaseSprite = GetSpriteForWeapon(weaponType),
@@ -2995,7 +3079,7 @@ namespace VSItemTooltips
                             var formula = new EvolutionFormula
                             {
                                 BaseWeapon = passiveType,
-                                Passives = CollectPassiveRequirements(ownSynergy),
+                                Passives = CollectPassiveRequirements(ownSynergy, GetRequiresMaxFromEvolved(ownEvoInto)),
                                 EvolvedWeapon = ownEvoType,
                                 EvolvedSprite = GetSpriteForWeapon(ownEvoType),
                                 BaseSprite = GetSpriteForWeapon(passiveType),
@@ -3041,11 +3125,12 @@ namespace VSItemTooltips
 
             // Create formula rows: [Weapon] + [Other Passives] → [Evolved]
             float iconSize = 36f;
-            float rowHeight = iconSize + 4f;
             int formulaIndex = 0;
 
             foreach (var formula in formulas)
             {
+                bool hasMaxReqRow = formula.Passives != null && formula.Passives.Exists(p => p.RequiresMaxLevel);
+                float rowHeight = iconSize + 4f + (hasMaxReqRow ? 12f : 0f);
                 float xOffset = Padding + 5f;
                 bool ownsWeapon = PlayerOwnsWeapon(formula.BaseWeapon);
 
@@ -3082,6 +3167,22 @@ namespace VSItemTooltips
                             AddHoverToGameObject(passiveIcon, passive.WeaponType.Value, null, useClick: true);
                         else if (passive.ItemType.HasValue)
                             AddHoverToGameObject(passiveIcon, null, passive.ItemType.Value, useClick: true);
+
+                        // "MAX" label below passive icon if required
+                        if (passive.RequiresMaxLevel)
+                        {
+                            var maxObj = CreateTextElement(parent, $"PassiveMax{formulaIndex}_{p}", "MAX", font, 9f,
+                                new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                            var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
+                            maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                            maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                            maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
+                            maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
+                            maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
+                            var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
+                            if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                        }
+
                         xOffset += iconSize + 3f;
                     }
                 }
@@ -3186,7 +3287,7 @@ namespace VSItemTooltips
                                     var formula = new EvolutionFormula
                                     {
                                         BaseWeapon = weaponType,
-                                        Passives = CollectPassiveRequirements(synergy),
+                                        Passives = CollectPassiveRequirements(synergy, GetRequiresMaxFromEvolved(evoInto)),
                                         EvolvedWeapon = evoType,
                                         BaseName = GetLocalizedWeaponName(weaponData, weaponType),
                                         BaseSprite = GetSpriteForWeapon(weaponType),
@@ -3240,11 +3341,12 @@ namespace VSItemTooltips
 
             // Create formula rows: [Weapon] + [All Passives] → [Evolved]
             float iconSize = 36f;
-            float rowHeight = iconSize + 4f;
             int formulaIndex = 0;
 
             foreach (var formula in formulas)
             {
+                bool hasMaxReqRow = formula.Passives != null && formula.Passives.Exists(p => p.RequiresMaxLevel);
+                float rowHeight = iconSize + 4f + (hasMaxReqRow ? 12f : 0f);
                 float xOffset = Padding + 5f;
                 bool ownsWeapon = PlayerOwnsWeapon(formula.BaseWeapon);
 
@@ -3277,6 +3379,22 @@ namespace VSItemTooltips
                             AddHoverToGameObject(passiveIcon, passive.WeaponType.Value, null, useClick: true);
                         else if (passive.ItemType.HasValue)
                             AddHoverToGameObject(passiveIcon, null, passive.ItemType.Value, useClick: true);
+
+                        // "MAX" label below passive icon if required
+                        if (passive.RequiresMaxLevel)
+                        {
+                            var maxObj = CreateTextElement(parent, $"Max{formulaIndex}_{p}", "MAX", font, 9f,
+                                new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                            var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
+                            maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                            maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                            maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
+                            maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
+                            maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
+                            var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
+                            if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                        }
+
                         xOffset += iconSize + 3f;
                     }
                 }
