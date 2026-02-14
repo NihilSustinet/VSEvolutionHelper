@@ -2,6 +2,10 @@
 
 A [MelonLoader](https://melonwiki.xyz/) mod for [Vampire Survivors](https://store.steampowered.com/app/1794680/Vampire_Survivors/) that adds rich, interactive tooltips to weapon and item icons throughout the game. Supports mouse, keyboard, and controller with full navigation.
 
+If you enjoy this mod, consider supporting me!
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/nihilxd)
+
 ## Supported Screens
 
 Tooltips work on every screen where weapon/item icons appear:
