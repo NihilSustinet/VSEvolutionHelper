@@ -608,9 +608,7 @@ namespace VSItemTooltips
                     }
                     else if (!equipmentNavMode && passivePopupShown)
                     {
-                        MelonLogger.Msg($"[Controller] Entering interactive mode (popupStack={popupStack.Count}, collectionPopup={collectionPopup != null})");
                         EnterInteractiveMode();
-                        MelonLogger.Msg($"[Controller] EnterInteractiveMode result: interactiveMode={interactiveMode}, formulaIcons={formulaIcons.Count}");
                     }
                     else if (!equipmentNavMode && !passivePopupShown && isGamePaused
                              && pauseView != null && pauseView.activeInHierarchy)
@@ -622,7 +620,6 @@ namespace VSItemTooltips
                 // A/Space button: enter interactive mode from equipment nav tooltip
                 if (IsSubmitButtonPressed() && equipmentNavMode && passivePopupShown && !interactiveMode)
                 {
-                    MelonLogger.Msg("[Controller] Entering interactive mode from equipment nav");
                     EnterInteractiveMode();
                 }
             }
@@ -1334,7 +1331,6 @@ namespace VSItemTooltips
             var img = t.GetComponent<UnityEngine.UI.Image>();
             string imgInfo = img != null && img.sprite != null ? $" [sprite: {img.sprite.name}]" : "";
 
-            MelonLogger.Msg($"{indent}{t.name}{imgInfo}");
 
             for (int i = 0; i < t.childCount && i < 10; i++)
             {
@@ -1343,7 +1339,6 @@ namespace VSItemTooltips
 
             if (t.childCount > 10)
             {
-                MelonLogger.Msg($"{indent}  ... and {t.childCount - 10} more children");
             }
         }
 
@@ -2133,7 +2128,6 @@ namespace VSItemTooltips
                 if (!usingController)
                 {
                     usingController = true;
-                    MelonLogger.Msg($"[Controller] Switched to controller mode (selected: {currentSelected.name})");
                 }
             }
             lastSelectedObject = currentSelected;
@@ -2195,7 +2189,6 @@ namespace VSItemTooltips
             var icon = FindTrackedIconForObject(selected);
             if (icon != null)
             {
-                MelonLogger.Msg($"[Controller] Dwell triggered on {selected.name} → weapon={icon.Value.weapon}, item={icon.Value.item}");
                 preDwellSelection = selected;
                 ShowItemPopup(selected.transform, icon.Value.weapon, icon.Value.item);
                 passivePopupShown = true;
@@ -2260,7 +2253,6 @@ namespace VSItemTooltips
             var icon = FindTrackedIconForObject(selected);
             if (icon != null)
             {
-                MelonLogger.Msg($"[Controller] Equipment dwell triggered on {selected.name} → weapon={icon.Value.weapon}, item={icon.Value.item}");
                 ShowItemPopup(selected.transform, icon.Value.weapon, icon.Value.item);
                 passivePopupShown = true;
             }
@@ -2302,7 +2294,6 @@ namespace VSItemTooltips
             int selectedId = selected.GetInstanceID();
             if (collectionIcons.TryGetValue(selectedId, out var iconData))
             {
-                MelonLogger.Msg($"[Controller] Collection dwell on {selected.name} → weapon={iconData.weapon}, item={iconData.item}");
                 preDwellSelection = selected;
                 ShowCollectionPopup(iconData.weapon, iconData.item, iconData.arcanaType);
                 passivePopupShown = true;
@@ -2316,7 +2307,6 @@ namespace VSItemTooltips
                     int parentId = parent.gameObject.GetInstanceID();
                     if (collectionIcons.TryGetValue(parentId, out var parentData))
                     {
-                        MelonLogger.Msg($"[Controller] Collection dwell (via parent {parent.name}) → weapon={parentData.weapon}, item={parentData.item}");
                         preDwellSelection = selected;
                         ShowCollectionPopup(parentData.weapon, parentData.item, parentData.arcanaType);
                         passivePopupShown = true;
@@ -2503,7 +2493,6 @@ namespace VSItemTooltips
                 btn.navigation = nav;
             }
 
-            MelonLogger.Msg($"[Controller] Navigation: {formulaIcons.Count} icons in {sortedRows.Count} rows");
         }
 
         /// <summary>
@@ -2536,7 +2525,6 @@ namespace VSItemTooltips
                     eventSystem.SetSelectedGameObject(formulaIcons[0]);
                 }
                 SetFormulaHighlight(0);
-                MelonLogger.Msg($"[Controller] Interactive mode: {formulaIcons.Count} icons, focused first icon");
 
                 // Hide the game's navigator arrows while in interactive mode
                 HideNavigatorArrows();
@@ -2586,7 +2574,6 @@ namespace VSItemTooltips
                 var eventSystem = UnityEngine.EventSystems.EventSystem.current;
                 if (eventSystem != null)
                 {
-                    MelonLogger.Msg($"[Controller] Exiting interactive mode, restoring focus to {preDwellSelection.name}");
                     eventSystem.SetSelectedGameObject(preDwellSelection);
                 }
             }
@@ -2650,7 +2637,6 @@ namespace VSItemTooltips
             SetEquipmentHighlight(0);
 
             HideNavigatorArrows();
-            MelonLogger.Msg($"[Controller] Entered equipment nav mode: {equipmentIcons.Count} icons");
         }
 
         /// <summary>
@@ -2733,7 +2719,6 @@ namespace VSItemTooltips
                 btn.navigation = nav;
             }
 
-            MelonLogger.Msg($"[Controller] Equipment navigation: {weaponCount} weapons, {accessoryCount} accessories");
         }
 
         /// <summary>
@@ -2741,7 +2726,6 @@ namespace VSItemTooltips
         /// </summary>
         private static void ExitEquipmentNavMode()
         {
-            MelonLogger.Msg("[Controller] Exiting equipment nav mode");
             equipmentNavMode = false;
             currentEquipmentIndex = -1;
             dwellTarget = null;
@@ -2927,7 +2911,6 @@ namespace VSItemTooltips
 
                 if (newPopup != null)
                 {
-                    MelonLogger.Msg("[Controller] Popup replaced, re-entering interactive mode");
                     CollectFormulaIcons(newPopup);
                     if (formulaIcons.Count > 0)
                     {
@@ -2939,7 +2922,6 @@ namespace VSItemTooltips
                     }
                 }
                 // Couldn't re-enter — exit
-                MelonLogger.Msg("[Controller] Popup replaced but no formula icons found, exiting interactive mode");
                 ExitInteractiveMode();
                 return;
             }
@@ -2953,7 +2935,6 @@ namespace VSItemTooltips
 
             if (currentTop != null && currentTop != interactivePopup)
             {
-                MelonLogger.Msg("[Controller] New popup on top of stack, switching interactive mode");
                 // Clean up old navigation
                 foreach (var icon in formulaIcons)
                 {
@@ -2985,7 +2966,6 @@ namespace VSItemTooltips
                 else
                 {
                     // New popup has no formula icons — exit interactive mode
-                    MelonLogger.Msg("[Controller] New popup has no formula icons, exiting interactive mode");
                     ExitInteractiveMode();
                     return;
                 }
@@ -2994,7 +2974,6 @@ namespace VSItemTooltips
             // If nothing is selected and icons aren't stale, something else happened (e.g., Escape)
             if (selected == null)
             {
-                MelonLogger.Msg("[Controller] Auto-exiting interactive mode (nothing selected)");
                 ExitInteractiveMode();
                 return;
             }
@@ -3040,7 +3019,6 @@ namespace VSItemTooltips
 
             if (!insidePopup)
             {
-                MelonLogger.Msg($"[Controller] Auto-exiting interactive mode (selection moved to {selected.name})");
                 ExitInteractiveMode();
             }
         }
@@ -3057,7 +3035,6 @@ namespace VSItemTooltips
             {
                 if (interactiveMode)
                 {
-                    MelonLogger.Msg("[Controller] Back: exiting interactive mode and closing collection popup");
                     ExitInteractiveMode();
                 }
                 HideCollectionPopup();
@@ -3080,7 +3057,6 @@ namespace VSItemTooltips
                 {
                     if (popupStack.Count > 1)
                     {
-                        MelonLogger.Msg($"[Controller] Back (equip): closing top popup, {popupStack.Count - 1} remaining");
                         ExitInteractiveMode();
                         HideTopPopup();
                         EnterInteractiveMode();
@@ -3088,7 +3064,6 @@ namespace VSItemTooltips
                     else
                     {
                         // Exit interactive mode, keep popup as passive, stay in equipment nav
-                        MelonLogger.Msg("[Controller] Back (equip): exiting interactive mode");
                         ExitInteractiveMode();
                         passivePopupShown = true;
                         // Restore focus to the equipment icon (not the pause menu button)
@@ -3103,7 +3078,6 @@ namespace VSItemTooltips
                 else if (passivePopupShown)
                 {
                     // Close popup, stay in equipment nav
-                    MelonLogger.Msg("[Controller] Back (equip): closing popup, staying in equipment nav");
                     HideAllPopups();
                     passivePopupShown = false;
                 }
@@ -3121,7 +3095,6 @@ namespace VSItemTooltips
                 if (popupStack.Count > 1)
                 {
                     // Close top popup, re-enter interactive mode on the one below
-                    MelonLogger.Msg($"[Controller] Back: closing top popup, {popupStack.Count - 1} remaining");
                     ExitInteractiveMode();
                     HideTopPopup();
                     EnterInteractiveMode();
@@ -3129,7 +3102,6 @@ namespace VSItemTooltips
                 else
                 {
                     // Only one popup left — exit interactive mode, keep popup as passive
-                    MelonLogger.Msg("[Controller] Back: exiting interactive mode (last popup)");
                     ExitInteractiveMode();
                     passivePopupShown = true;
                 }
@@ -3137,7 +3109,6 @@ namespace VSItemTooltips
             else if (passivePopupShown && popupStack.Count > 0)
             {
                 // Close the passive popup entirely
-                MelonLogger.Msg("[Controller] Back: closing passive popup");
                 HideAllPopups();
                 passivePopupShown = false;
                 // Restore focus
