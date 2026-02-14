@@ -27,7 +27,7 @@ Tooltips work on every screen where weapon/item icons appear:
 ## Installation
 
 1. Install the latest [MelonLoader nightly build](https://nightly.link/LavaGang/MelonLoader/workflows/build/alpha-development/MelonLoader.Installer.exe.zip) for Vampire Survivors
-2. Download `VSEvolutionHelper.dll` from the [latest release](https://github.com/NihilSustinet/VSEvolutionHelper/releases/latest)
+2. Download `VSEvolutionHelper.dll` from the [latest release](https://github.com/NihilXD/VSEvolutionHelper/releases/latest)
 3. Copy the DLL to your Vampire Survivors `Mods` folder:
    ```
    <Steam>/steamapps/common/Vampire Survivors/Mods/VSEvolutionHelper.dll
