@@ -9,7 +9,7 @@ using Il2CppVampireSurvivors.Data.Weapons;
 using Il2CppVampireSurvivors.Objects;
 using Il2CppVampireSurvivors.UI;
 
-[assembly: MelonInfo(typeof(VSItemTooltips.ItemTooltipsMod), "VS Item Tooltips", "1.1.2", "NihilXD")]
+[assembly: MelonInfo(typeof(VSItemTooltips.ItemTooltipsMod), "VS Item Tooltips", "1.2.0", "NihilXD")]
 [assembly: MelonGame("poncle", "Vampire Survivors")]
 
 namespace VSItemTooltips
@@ -95,6 +95,11 @@ namespace VSItemTooltips
         private static List<(WeaponType? weapon, ItemType? item, object arcana)> collectionPopupBackStack =
             new List<(WeaponType?, ItemType?, object)>();
         private static (WeaponType? weapon, ItemType? item, object arcana) currentCollectionPopupData;
+        // Equipment navigation mode (pause screen)
+        private static bool equipmentNavMode = false;
+        private static List<UnityEngine.GameObject> equipmentIcons = new List<UnityEngine.GameObject>();
+        private static int currentEquipmentIndex = -1;
+        private static UnityEngine.GameObject equipmentHighlight = null;
 
         // Styling
         private static readonly UnityEngine.Color PopupBgColor = new UnityEngine.Color(0.08f, 0.08f, 0.12f, 0.98f);
@@ -588,20 +593,45 @@ namespace VSItemTooltips
                 HandleBackButton();
                 UpdateInteractiveMode();
 
-                // Interact button: enter interactive mode on passive popup
-                if (IsInteractButtonPressed() && passivePopupShown && !interactiveMode)
+                if (equipmentNavMode)
+                    UpdateEquipmentNavMode();
+
+                // Y/Tab button logic:
+                // 1. Already interactive → acts as back
+                // 2. Not in equipment nav, popup showing → enter interactive mode
+                // 3. Pause screen, no equipment nav, no popup → enter equipment nav
+                if (IsInteractButtonPressed())
                 {
-                    MelonLogger.Msg($"[Controller] Entering interactive mode (popupStack={popupStack.Count}, collectionPopup={collectionPopup != null})");
+                    if (interactiveMode)
+                    {
+                        HandleBackButton(true);
+                    }
+                    else if (!equipmentNavMode && passivePopupShown)
+                    {
+                        MelonLogger.Msg($"[Controller] Entering interactive mode (popupStack={popupStack.Count}, collectionPopup={collectionPopup != null})");
+                        EnterInteractiveMode();
+                        MelonLogger.Msg($"[Controller] EnterInteractiveMode result: interactiveMode={interactiveMode}, formulaIcons={formulaIcons.Count}");
+                    }
+                    else if (!equipmentNavMode && !passivePopupShown && isGamePaused
+                             && pauseView != null && pauseView.activeInHierarchy)
+                    {
+                        EnterEquipmentNavMode();
+                    }
+                }
+
+                // A/Space button: enter interactive mode from equipment nav tooltip
+                if (IsSubmitButtonPressed() && equipmentNavMode && passivePopupShown && !interactiveMode)
+                {
+                    MelonLogger.Msg("[Controller] Entering interactive mode from equipment nav");
                     EnterInteractiveMode();
-                    MelonLogger.Msg($"[Controller] EnterInteractiveMode result: interactiveMode={interactiveMode}, formulaIcons={formulaIcons.Count}");
                 }
             }
 
             // Only process when game is paused
             if (!isGamePaused) return;
 
-            // Controller/keyboard dwell detection for paused screens
-            if (usingController)
+            // Controller/keyboard dwell detection for paused screens (skip if in equipment nav mode)
+            if (usingController && !equipmentNavMode)
             {
                 UpdateControllerDwell();
             }
@@ -2083,6 +2113,7 @@ namespace VSItemTooltips
             {
                 if (usingController)
                 {
+                    if (equipmentNavMode) ExitEquipmentNavMode();
                     usingController = false;
                     ExitInteractiveMode();
                     dwellTarget = null;
@@ -2166,6 +2197,70 @@ namespace VSItemTooltips
             {
                 MelonLogger.Msg($"[Controller] Dwell triggered on {selected.name} → weapon={icon.Value.weapon}, item={icon.Value.item}");
                 preDwellSelection = selected;
+                ShowItemPopup(selected.transform, icon.Value.weapon, icon.Value.item);
+                passivePopupShown = true;
+            }
+        }
+
+        /// <summary>
+        /// Handles dwell detection while in equipment navigation mode on the pause screen.
+        /// Shows tooltip popup after dwelling on an equipment icon.
+        /// </summary>
+        private static void UpdateEquipmentNavMode()
+        {
+            if (!equipmentNavMode) return;
+            if (interactiveMode) return; // Interactive mode handles its own updates
+
+            var eventSystem = UnityEngine.EventSystems.EventSystem.current;
+            if (eventSystem == null) return;
+
+            var selected = eventSystem.currentSelectedGameObject;
+            if (selected == null)
+            {
+                dwellTarget = null;
+                return;
+            }
+
+            // Track which equipment icon is selected and move highlight
+            for (int i = 0; i < equipmentIcons.Count; i++)
+            {
+                if (equipmentIcons[i] != null && (selected == equipmentIcons[i] || selected.transform.IsChildOf(equipmentIcons[i].transform)))
+                {
+                    if (i != currentEquipmentIndex)
+                    {
+                        currentEquipmentIndex = i;
+                        SetEquipmentHighlight(i);
+                    }
+                    break;
+                }
+            }
+
+            // Selection changed
+            if (selected != dwellTarget)
+            {
+                dwellTarget = selected;
+                dwellStartTime = UnityEngine.Time.unscaledTime;
+
+                // Close existing popup if selection moved
+                if (passivePopupShown)
+                {
+                    HideAllPopups();
+                    passivePopupShown = false;
+                }
+                return;
+            }
+
+            // Same selection — check dwell
+            if (passivePopupShown) return;
+
+            float elapsed = UnityEngine.Time.unscaledTime - dwellStartTime;
+            if (elapsed < DwellDelay) return;
+
+            // Dwell time reached — show tooltip
+            var icon = FindTrackedIconForObject(selected);
+            if (icon != null)
+            {
+                MelonLogger.Msg($"[Controller] Equipment dwell triggered on {selected.name} → weapon={icon.Value.weapon}, item={icon.Value.item}");
                 ShowItemPopup(selected.transform, icon.Value.weapon, icon.Value.item);
                 passivePopupShown = true;
             }
@@ -2271,7 +2366,8 @@ namespace VSItemTooltips
         }
 
         /// <summary>
-        /// Checks if the interact button was pressed (Enter, E, or controller A/Cross).
+        /// Checks if the interact button was pressed (Tab or controller Y/Triangle).
+        /// When not in interactive mode this enters it; when already interactive it acts as back.
         /// </summary>
         private static bool IsInteractButtonPressed()
         {
@@ -2287,6 +2383,16 @@ namespace VSItemTooltips
         {
             return UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.Backspace) ||
                    UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.JoystickButton1);
+        }
+
+        /// <summary>
+        /// Checks if the submit/confirm button was pressed (Space, Enter, or controller A/Cross).
+        /// </summary>
+        private static bool IsSubmitButtonPressed()
+        {
+            return UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.Space) ||
+                   UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.Return) ||
+                   UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.JoystickButton0); // A/Cross
         }
 
         /// <summary>
@@ -2487,6 +2593,198 @@ namespace VSItemTooltips
         }
 
         /// <summary>
+        /// Enters equipment navigation mode on the pause screen.
+        /// Collects equipment icons, adds Selectable components, sets up navigation, and focuses the first icon.
+        /// </summary>
+        private static void EnterEquipmentNavMode()
+        {
+            if (pauseView == null || !pauseView.activeInHierarchy) return;
+
+            var equipmentPanel = FindChildRecursive(pauseView.transform, "EquipmentPanel");
+            if (equipmentPanel == null) return;
+
+            var weaponsPanel = equipmentPanel.Find("WeaponsPanel");
+            var accessoryPanel = equipmentPanel.Find("AccessoryPanel");
+
+            equipmentIcons.Clear();
+
+            // Collect equipment icons from both panels, tracking counts per panel
+            CollectEquipmentIcons(weaponsPanel);
+            int weaponIconCount = equipmentIcons.Count;
+            CollectEquipmentIcons(accessoryPanel);
+
+            if (equipmentIcons.Count == 0) return;
+
+            // Add Button components for navigation (if not already present)
+            foreach (var icon in equipmentIcons)
+            {
+                if (icon.GetComponent<UnityEngine.UI.Button>() == null)
+                {
+                    var btn = icon.AddComponent<UnityEngine.UI.Button>();
+                    var colors = btn.colors;
+                    colors.normalColor = new UnityEngine.Color(1f, 1f, 1f, 0f);
+                    colors.highlightedColor = new UnityEngine.Color(1f, 1f, 1f, 0f);
+                    colors.pressedColor = new UnityEngine.Color(1f, 1f, 1f, 0f);
+                    colors.selectedColor = new UnityEngine.Color(1f, 1f, 1f, 0f);
+                    btn.colors = colors;
+                }
+            }
+
+            // Set up navigation — weapons row then accessories row
+            SetupEquipmentNavigation(weaponIconCount);
+
+            // Save current selection and enter equipment nav mode
+            var eventSystem = UnityEngine.EventSystems.EventSystem.current;
+            if (eventSystem != null)
+                preDwellSelection = eventSystem.currentSelectedGameObject;
+
+            equipmentNavMode = true;
+            currentEquipmentIndex = 0;
+            dwellTarget = null;
+            dwellStartTime = 0f;
+            passivePopupShown = false;
+
+            // Focus first icon and highlight it
+            if (eventSystem != null)
+                eventSystem.SetSelectedGameObject(equipmentIcons[0]);
+            SetEquipmentHighlight(0);
+
+            HideNavigatorArrows();
+            MelonLogger.Msg($"[Controller] Entered equipment nav mode: {equipmentIcons.Count} icons");
+        }
+
+        /// <summary>
+        /// Collects EquipmentIconPause children that have a tracked weapon/item type.
+        /// </summary>
+        private static void CollectEquipmentIcons(UnityEngine.Transform panel)
+        {
+            if (panel == null) return;
+
+            for (int i = 0; i < panel.childCount; i++)
+            {
+                var child = panel.GetChild(i);
+                if (!child.name.Contains("EquipmentIconPause")) continue;
+                if (!child.gameObject.activeInHierarchy) continue;
+
+                // Only include icons that have a tracked type
+                var iconData = FindTrackedIconForObject(child.gameObject);
+                if (iconData != null)
+                    equipmentIcons.Add(child.gameObject);
+            }
+        }
+
+        /// <summary>
+        /// Sets up explicit navigation links between equipment icons.
+        /// Groups by Y position (weapons row vs accessories row), left/right within row, up/down between rows.
+        /// </summary>
+        private static void SetupEquipmentNavigation(int weaponCount)
+        {
+            if (equipmentIcons.Count == 0) return;
+
+            // Row 0: weapons (indices 0 to weaponCount-1)
+            // Row 1: accessories (indices weaponCount to end)
+            int accessoryStart = weaponCount;
+            int accessoryCount = equipmentIcons.Count - weaponCount;
+
+            for (int i = 0; i < equipmentIcons.Count; i++)
+            {
+                var btn = equipmentIcons[i].GetComponent<UnityEngine.UI.Button>();
+                if (btn == null) continue;
+
+                var nav = new UnityEngine.UI.Navigation();
+                nav.mode = UnityEngine.UI.Navigation.Mode.Explicit;
+
+                bool isWeapon = i < weaponCount;
+                int rowStart = isWeapon ? 0 : accessoryStart;
+                int rowEnd = isWeapon ? weaponCount : equipmentIcons.Count;
+                int col = i - rowStart;
+                int rowSize = rowEnd - rowStart;
+
+                // Left: previous in same row
+                if (col > 0)
+                {
+                    var leftBtn = equipmentIcons[i - 1].GetComponent<UnityEngine.UI.Selectable>();
+                    if (leftBtn != null) nav.selectOnLeft = leftBtn;
+                }
+
+                // Right: next in same row
+                if (col < rowSize - 1)
+                {
+                    var rightBtn = equipmentIcons[i + 1].GetComponent<UnityEngine.UI.Selectable>();
+                    if (rightBtn != null) nav.selectOnRight = rightBtn;
+                }
+
+                // Up/Down between rows
+                if (isWeapon && accessoryCount > 0)
+                {
+                    // Down to accessories — same column or closest
+                    int downIdx = accessoryStart + System.Math.Min(col, accessoryCount - 1);
+                    var downBtn = equipmentIcons[downIdx].GetComponent<UnityEngine.UI.Selectable>();
+                    if (downBtn != null) nav.selectOnDown = downBtn;
+                }
+                else if (!isWeapon && weaponCount > 0)
+                {
+                    // Up to weapons — same column or closest
+                    int upIdx = System.Math.Min(col, weaponCount - 1);
+                    var upBtn = equipmentIcons[upIdx].GetComponent<UnityEngine.UI.Selectable>();
+                    if (upBtn != null) nav.selectOnUp = upBtn;
+                }
+
+                btn.navigation = nav;
+            }
+
+            MelonLogger.Msg($"[Controller] Equipment navigation: {weaponCount} weapons, {accessoryCount} accessories");
+        }
+
+        /// <summary>
+        /// Exits equipment navigation mode, restoring focus to the pause menu buttons.
+        /// </summary>
+        private static void ExitEquipmentNavMode()
+        {
+            MelonLogger.Msg("[Controller] Exiting equipment nav mode");
+            equipmentNavMode = false;
+            currentEquipmentIndex = -1;
+            dwellTarget = null;
+
+            if (equipmentHighlight != null)
+            {
+                UnityEngine.Object.Destroy(equipmentHighlight);
+                equipmentHighlight = null;
+            }
+
+            // Reset navigation on equipment icons
+            foreach (var icon in equipmentIcons)
+            {
+                if (icon == null) continue;
+                var btn = icon.GetComponent<UnityEngine.UI.Button>();
+                if (btn != null)
+                {
+                    var nav = btn.navigation;
+                    nav.mode = UnityEngine.UI.Navigation.Mode.None;
+                    btn.navigation = nav;
+                }
+            }
+            equipmentIcons.Clear();
+
+            // Close any open popups
+            if (passivePopupShown)
+            {
+                HideAllPopups();
+                passivePopupShown = false;
+            }
+
+            ShowNavigatorArrows();
+
+            // Restore focus to previous selection
+            if (preDwellSelection != null)
+            {
+                var eventSystem = UnityEngine.EventSystems.EventSystem.current;
+                if (eventSystem != null)
+                    eventSystem.SetSelectedGameObject(preDwellSelection);
+            }
+        }
+
+        /// <summary>
         /// Collects all formula icons from a popup that have associated weapon/item data.
         /// </summary>
         private static void CollectFormulaIcons(UnityEngine.GameObject popup)
@@ -2540,6 +2838,59 @@ namespace VSItemTooltips
 
             var outline = interactiveHighlight.AddComponent<UnityEngine.UI.Outline>();
             outline.effectColor = new UnityEngine.Color(0f, 0.9f, 1f, 1f); // Cyan border
+            outline.effectDistance = new UnityEngine.Vector2(2f, 2f);
+        }
+
+        /// <summary>
+        /// Sets the visual highlight on the equipment icon at the given index.
+        /// </summary>
+        private static void SetEquipmentHighlight(int index)
+        {
+            if (equipmentHighlight != null)
+            {
+                UnityEngine.Object.Destroy(equipmentHighlight);
+                equipmentHighlight = null;
+            }
+
+            if (index < 0 || index >= equipmentIcons.Count) return;
+
+            var target = equipmentIcons[index];
+            if (target == null) return;
+
+            // Find the largest child Image to parent the highlight to (the actual visible icon)
+            UnityEngine.Transform highlightParent = target.transform;
+            float highlightSize = 48f;
+            var images = target.GetComponentsInChildren<UnityEngine.UI.Image>(false);
+            foreach (var img in images)
+            {
+                if (img.gameObject == target) continue;
+                var imgRect = img.GetComponent<UnityEngine.RectTransform>();
+                if (imgRect != null)
+                {
+                    float size = UnityEngine.Mathf.Max(imgRect.rect.width, imgRect.rect.height);
+                    if (size > highlightSize)
+                    {
+                        highlightSize = size;
+                        highlightParent = img.transform;
+                    }
+                }
+            }
+
+            equipmentHighlight = new UnityEngine.GameObject("EquipmentHighlight");
+            equipmentHighlight.transform.SetParent(highlightParent, false);
+
+            var highlightRect = equipmentHighlight.AddComponent<UnityEngine.RectTransform>();
+            highlightRect.anchorMin = new UnityEngine.Vector2(0.5f, 0.5f);
+            highlightRect.anchorMax = new UnityEngine.Vector2(0.5f, 0.5f);
+            highlightRect.pivot = new UnityEngine.Vector2(0.5f, 0.5f);
+            highlightRect.sizeDelta = new UnityEngine.Vector2(highlightSize + 6f, highlightSize + 6f);
+
+            var highlightImage = equipmentHighlight.AddComponent<UnityEngine.UI.Image>();
+            highlightImage.color = new UnityEngine.Color(0f, 0.9f, 1f, 0.25f);
+            highlightImage.raycastTarget = false;
+
+            var outline = equipmentHighlight.AddComponent<UnityEngine.UI.Outline>();
+            outline.effectColor = new UnityEngine.Color(0f, 0.9f, 1f, 1f);
             outline.effectDistance = new UnityEngine.Vector2(2f, 2f);
         }
 
@@ -2697,9 +3048,9 @@ namespace VSItemTooltips
         /// <summary>
         /// Handles back button press for closing popup layers.
         /// </summary>
-        private static void HandleBackButton()
+        private static void HandleBackButton(bool force = false)
         {
-            if (!IsBackButtonPressed()) return;
+            if (!force && !IsBackButtonPressed()) return;
 
             // --- Collection popups: simple close, no back-stack navigation ---
             if (collectionPopup != null && popupStack.Count == 0)
@@ -2718,6 +3069,48 @@ namespace VSItemTooltips
                     var eventSystem = UnityEngine.EventSystems.EventSystem.current;
                     if (eventSystem != null)
                         eventSystem.SetSelectedGameObject(preDwellSelection);
+                }
+                return;
+            }
+
+            // --- Equipment nav mode on pause screen ---
+            if (equipmentNavMode)
+            {
+                if (interactiveMode)
+                {
+                    if (popupStack.Count > 1)
+                    {
+                        MelonLogger.Msg($"[Controller] Back (equip): closing top popup, {popupStack.Count - 1} remaining");
+                        ExitInteractiveMode();
+                        HideTopPopup();
+                        EnterInteractiveMode();
+                    }
+                    else
+                    {
+                        // Exit interactive mode, keep popup as passive, stay in equipment nav
+                        MelonLogger.Msg("[Controller] Back (equip): exiting interactive mode");
+                        ExitInteractiveMode();
+                        passivePopupShown = true;
+                        // Restore focus to the equipment icon (not the pause menu button)
+                        if (dwellTarget != null)
+                        {
+                            var eventSystem = UnityEngine.EventSystems.EventSystem.current;
+                            if (eventSystem != null)
+                                eventSystem.SetSelectedGameObject(dwellTarget);
+                        }
+                    }
+                }
+                else if (passivePopupShown)
+                {
+                    // Close popup, stay in equipment nav
+                    MelonLogger.Msg("[Controller] Back (equip): closing popup, staying in equipment nav");
+                    HideAllPopups();
+                    passivePopupShown = false;
+                }
+                else
+                {
+                    // No popup — exit equipment nav entirely
+                    ExitEquipmentNavMode();
                 }
                 return;
             }
@@ -2772,11 +3165,19 @@ namespace VSItemTooltips
             preDwellSelection = null;
             lastSelectedObject = null;
             collectionPopupBackStack.Clear();
+            equipmentNavMode = false;
+            equipmentIcons.Clear();
+            currentEquipmentIndex = -1;
             ShowNavigatorArrows();
             if (interactiveHighlight != null)
             {
                 UnityEngine.Object.Destroy(interactiveHighlight);
                 interactiveHighlight = null;
+            }
+            if (equipmentHighlight != null)
+            {
+                UnityEngine.Object.Destroy(equipmentHighlight);
+                equipmentHighlight = null;
             }
         }
 
@@ -4743,10 +5144,16 @@ namespace VSItemTooltips
             // In controller mode, shift the first popup left so it doesn't overlap cards.
             // Recursive popups (popupStack > 0) should appear near the formula icon instead.
             float posX, posY;
-            if (usingController && popupStack.Count <= 1 && !interactiveMode)
+            if (usingController && equipmentNavMode && !interactiveMode && popupStack.Count <= 1)
             {
-                // First popup from dwell — shift left of anchor
-                posX = localPos.x - (popupRect.sizeDelta.x * 0.75f);
+                // Equipment nav popup — slightly right of anchor, below the equipment rows
+                posX = localPos.x + 40f;
+                posY = localPos.y - 60f;
+            }
+            else if (usingController && popupStack.Count <= 1 && !interactiveMode)
+            {
+                // First popup from dwell — shift left of anchor (but not too far)
+                posX = localPos.x - (popupRect.sizeDelta.x * 0.5f);
                 posY = localPos.y + 15f;
             }
             else if (usingController)
@@ -4801,7 +5208,8 @@ namespace VSItemTooltips
                 float maxY = posY - 20f;
 
                 // If anchor is outside the popup after clamping, adjust
-                if (localPos.x < minX || localPos.x > maxX || localPos.y < minY || localPos.y > maxY)
+                // Skip for equipment nav — popup is intentionally placed away from anchor
+                if (!equipmentNavMode && (localPos.x < minX || localPos.x > maxX || localPos.y < minY || localPos.y > maxY))
                 {
                     // Try to keep mouse inside by shifting popup
                     if (localPos.x < minX) posX = localPos.x - 20f;
