@@ -45,52 +45,9 @@ namespace VSItemTooltips
         private static Dictionary<int, WeaponType> uiToWeaponType = new Dictionary<int, WeaponType>();
         private static Dictionary<int, ItemType> uiToItemType = new Dictionary<int, ItemType>();
 
-        // Wrapper properties - redirect to GameDataCache (gradual migration in progress)
-        private static Dictionary<string, WeaponType> spriteToWeaponType
-        {
-            get => GameDataCache.SpriteToWeaponType;
-            set { } // Setter handled by GameDataCache.BuildLookupTables()
-        }
-        private static Dictionary<string, ItemType> spriteToItemType
-        {
-            get => GameDataCache.SpriteToItemType;
-            set { } // Setter handled by GameDataCache.BuildLookupTables()
-        }
-        private static bool lookupTablesBuilt
-        {
-            get => GameDataCache.LookupTablesBuilt;
-            set { } // Setter handled by GameDataCache.BuildLookupTables()
-        }
-        private static bool loggedLookupTables = false; // Local flag, not in cache
-
-        private static object cachedDataManager
-        {
-            get => GameDataCache.DataManager;
-            set => GameDataCache.CacheDataManager(value);
-        }
-        private static object cachedWeaponsDict => GameDataCache.WeaponsDict;
-        private static object cachedPowerUpsDict => GameDataCache.PowerUpsDict;
-        private static VSItemTooltips.Adapters.EvolutionFormulaCache evolutionCache
-        {
-            get => GameDataCache.EvolutionCache;
-            set { } // Setter handled by GameDataCache.CacheDataManager()
-        }
-        private static object cachedGameSession
-        {
-            get => GameDataCache.GameSession;
-            set => GameDataCache.CacheGameSession(value);
-        }
-        private static System.Type cachedArcanaTypeEnum
-        {
-            get => GameDataCache.ArcanaTypeEnum;
-            set => GameDataCache.SetArcanaTypeEnum(value);
-        }
-        private static object cachedAllArcanas => GameDataCache.GetAllArcanas();
-        private static object cachedGameManager
-        {
-            get => GameDataCache.GameManager;
-            set => GameDataCache.SetGameManager(value);
-        }
+        // NOTE: All data caching (DataManager, GameSession, lookup tables, etc.) is now in GameDataCache.cs
+        // Local tracking flag only
+        private static bool loggedLookupTables = false;
         private static bool arcanaDebugLogged = false;
         private static HashSet<WeaponType> arcanaWeaponDebugLogged = new HashSet<WeaponType>();
         private static Dictionary<int, (HashSet<WeaponType> weapons, HashSet<ItemType> items)> arcanaUICache =
@@ -240,7 +197,7 @@ namespace VSItemTooltips
                     arcanaTypeEnum = gameAssembly.GetTypes().FirstOrDefault(t => t.Name == "ArcanaType");
                     if (arcanaTypeEnum != null)
                     {
-                        cachedArcanaTypeEnum = arcanaTypeEnum;
+                        GameDataCache.SetArcanaTypeEnum(arcanaTypeEnum);
                     }
                 }
                 catch { }
@@ -401,7 +358,7 @@ namespace VSItemTooltips
         private void TryEarlyCaching()
         {
             if (triedEarlyCaching) return;
-            if (cachedDataManager != null && cachedWeaponsDict != null) return;
+            if (GameDataCache.DataManager != null && GameDataCache.WeaponsDict != null) return;
 
             triedEarlyCaching = true;
 
@@ -540,7 +497,7 @@ namespace VSItemTooltips
         public override void OnUpdate()
         {
             // Try to cache data early (once per scene)
-            if (!triedEarlyCaching && cachedDataManager == null)
+            if (!triedEarlyCaching && GameDataCache.DataManager == null)
             {
                 TryEarlyCaching();
             }
@@ -592,13 +549,13 @@ namespace VSItemTooltips
                 }
 
                 // Try to get game session if we don't have it yet
-                if (cachedGameSession == null)
+                if (GameDataCache.GameSession == null)
                 {
                     TryFindGameSession();
                 }
 
                 // Setup HUD hovers when paused
-                if (hudInventory != null && cachedGameSession != null)
+                if (hudInventory != null && GameDataCache.GameSession != null)
                 {
                     SetupHUDHovers();
                 }
@@ -924,10 +881,10 @@ namespace VSItemTooltips
                 return;
 
             // Build lookup tables if needed
-            if (!lookupTablesBuilt)
+            if (!GameDataCache.LookupTablesBuilt)
             {
                 BuildLookupTables();
-                if (!lookupTablesBuilt && !loggedScanStatus)
+                if (!GameDataCache.LookupTablesBuilt && !loggedScanStatus)
                 {
                     MelonLogger.Warning("Lookup tables not built - no DataManager cached yet. Hovers won't work until level-up.");
                     loggedScanStatus = true;
@@ -971,11 +928,11 @@ namespace VSItemTooltips
                     WeaponType? weaponType = null;
                     ItemType? itemType = null;
 
-                    if (spriteToWeaponType != null && spriteToWeaponType.TryGetValue(spriteName, out var wt))
+                    if (GameDataCache.SpriteToWeaponType != null && GameDataCache.SpriteToWeaponType.TryGetValue(spriteName, out var wt))
                     {
                         weaponType = wt;
                     }
-                    else if (spriteToItemType != null && spriteToItemType.TryGetValue(spriteName, out var it))
+                    else if (GameDataCache.SpriteToItemType != null && GameDataCache.SpriteToItemType.TryGetValue(spriteName, out var it))
                     {
                         itemType = it;
                     }
@@ -1479,192 +1436,24 @@ namespace VSItemTooltips
 
         #region Lookup Tables
 
+        // Wrapper method - delegates to GameDataCache
         private static void BuildLookupTables()
         {
-            if (lookupTablesBuilt) return;
+            GameDataCache.BuildLookupTables();
 
-            spriteToWeaponType = new Dictionary<string, WeaponType>();
-            spriteToItemType = new Dictionary<string, ItemType>();
-
-            try
+            // Log if tables were built (local flag only)
+            if (GameDataCache.LookupTablesBuilt && !loggedLookupTables)
             {
-                // Build from weapons dictionary if available
-                if (cachedWeaponsDict != null)
-                {
-                    BuildWeaponLookup(cachedWeaponsDict);
-                }
-
-                // Build from powerups dictionary if available
-                if (cachedPowerUpsDict != null)
-                {
-                    BuildPowerUpLookup(cachedPowerUpsDict);
-                }
-
-                lookupTablesBuilt = spriteToWeaponType.Count > 0 || spriteToItemType.Count > 0;
-
-                if (lookupTablesBuilt && !loggedLookupTables)
-                {
-                    loggedLookupTables = true;
-                    MelonLogger.Msg($"Built lookup tables: {spriteToWeaponType.Count} weapons, {spriteToItemType.Count} items");
-                }
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Error($"Failed to build lookup tables: {ex}");
-            }
-        }
-
-        private static void BuildWeaponLookup(object weaponsDict)
-        {
-            try
-            {
-                // Get dictionary entries using reflection
-                var dictType = weaponsDict.GetType();
-
-                var keysProperty = dictType.GetProperty("Keys");
-                if (keysProperty == null) return;
-
-                var keys = keysProperty.GetValue(weaponsDict);
-
-                int count = 0;
-                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
-                var moveNext = enumerator.GetType().GetMethod("MoveNext");
-                var current = enumerator.GetType().GetProperty("Current");
-
-                while ((bool)moveNext.Invoke(enumerator, null))
-                {
-                    count++;
-                    var key = current.GetValue(enumerator);
-
-                    if (key is WeaponType wt)
-                    {
-                        var indexer = dictType.GetProperty("Item");
-                        if (indexer != null)
-                        {
-                            // Value is a List<WeaponData>, not a single WeaponData
-                            var dataList = indexer.GetValue(weaponsDict, new object[] { key });
-                            if (dataList != null)
-                            {
-                                // Get count and iterate the list
-                                var listType = dataList.GetType();
-                                var countProp = listType.GetProperty("Count");
-                                var listIndexer = listType.GetProperty("Item");
-
-                                if (countProp != null && listIndexer != null)
-                                {
-                                    int listCount = (int)countProp.GetValue(dataList);
-                                    for (int i = 0; i < listCount; i++)
-                                    {
-                                        var data = listIndexer.GetValue(dataList, new object[] { i }) as WeaponData;
-                                        if (data != null && !string.IsNullOrEmpty(data.frameName))
-                                        {
-                                            spriteToWeaponType[data.frameName] = wt;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Warning($"Error building weapon lookup: {ex}");
-            }
-        }
-
-        private static void BuildPowerUpLookup(object powerUpsDict)
-        {
-            try
-            {
-                var dictType = powerUpsDict.GetType();
-
-                var keysProperty = dictType.GetProperty("Keys");
-                if (keysProperty == null) return;
-
-                var keys = keysProperty.GetValue(powerUpsDict);
-                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
-                var moveNext = enumerator.GetType().GetMethod("MoveNext");
-                var current = enumerator.GetType().GetProperty("Current");
-
-                int count = 0;
-                while ((bool)moveNext.Invoke(enumerator, null))
-                {
-                    count++;
-                    var key = current.GetValue(enumerator);
-                    if (key is ItemType it)
-                    {
-                        var indexer = dictType.GetProperty("Item");
-                        if (indexer != null)
-                        {
-                            var dataOrList = indexer.GetValue(powerUpsDict, new object[] { key });
-                            if (dataOrList != null)
-                            {
-                                // Check if it's a List or single item
-                                var dataType = dataOrList.GetType();
-                                // Try as List first
-                                var countProp = dataType.GetProperty("Count");
-                                if (countProp != null)
-                                {
-                                    // It's a list
-                                    var listIndexer = dataType.GetProperty("Item");
-                                    int listCount = (int)countProp.GetValue(dataOrList);
-                                    for (int i = 0; i < listCount; i++)
-                                    {
-                                        var data = listIndexer.GetValue(dataOrList, new object[] { i });
-                                        AddPowerUpToLookup(data, it);
-                                    }
-                                }
-                                else
-                                {
-                                    // Single item
-                                    AddPowerUpToLookup(dataOrList, it);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Warning($"Error building powerup lookup: {ex.Message}");
-            }
-        }
-
-        private static void AddPowerUpToLookup(object data, ItemType it)
-        {
-            if (data == null) return;
-
-            string frameName = null;
-
-            // Try property first
-            var frameNameProp = data.GetType().GetProperty("frameName", BindingFlags.Public | BindingFlags.Instance);
-            if (frameNameProp != null)
-            {
-                frameName = frameNameProp.GetValue(data) as string;
-            }
-
-            // Try field if property didn't work
-            if (string.IsNullOrEmpty(frameName))
-            {
-                var frameNameField = data.GetType().GetField("frameName", BindingFlags.Public | BindingFlags.Instance);
-                if (frameNameField != null)
-                {
-                    frameName = frameNameField.GetValue(data) as string;
-                }
-            }
-
-            if (!string.IsNullOrEmpty(frameName))
-            {
-                spriteToItemType[frameName] = it;
+                loggedLookupTables = true;
+                MelonLogger.Msg($"Built lookup tables: {GameDataCache.SpriteToWeaponType.Count} weapons, {GameDataCache.SpriteToItemType.Count} items");
             }
         }
 
         public static void CacheGameSession(object gameSession)
         {
-            cachedGameSession = gameSession;
+            GameDataCache.CacheGameSession(gameSession);
             // Also cache DataManager from the session if we don't have it yet
-            if (cachedDataManager == null && gameSession != null)
+            if (GameDataCache.DataManager == null && gameSession != null)
             {
                 try
                 {
@@ -1725,7 +1514,7 @@ namespace VSItemTooltips
                                     var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                                     if (charProp != null)
                                     {
-                                        cachedGameSession = session;
+                                        GameDataCache.CacheGameSession(session);
                                         return;
                                     }
                                 }
@@ -1799,7 +1588,7 @@ namespace VSItemTooltips
                                         var activeCharProp = instance.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                                         if (activeCharProp != null)
                                         {
-                                            cachedGameSession = instance;
+                                            GameDataCache.CacheGameSession(instance);
                                             return;
                                         }
                                     }
@@ -1822,7 +1611,7 @@ namespace VSItemTooltips
                                         var activeCharProp = instance.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                                         if (activeCharProp != null)
                                         {
-                                            cachedGameSession = instance;
+                                            GameDataCache.CacheGameSession(instance);
                                             return;
                                         }
                                     }
@@ -1886,7 +1675,7 @@ namespace VSItemTooltips
                             var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                             if (charProp != null)
                             {
-                                cachedGameSession = session;
+                                GameDataCache.CacheGameSession(session);
                                 return true;
                             }
                         }
@@ -1901,7 +1690,7 @@ namespace VSItemTooltips
                             var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                             if (charProp != null)
                             {
-                                cachedGameSession = session;
+                                GameDataCache.CacheGameSession(session);
                                 return true;
                             }
                         }
@@ -1919,15 +1708,15 @@ namespace VSItemTooltips
         /// </summary>
         public static void SetupHUDHovers()
         {
-            if (cachedGameSession == null || hudInventory == null) return;
+            if (GameDataCache.GameSession == null || hudInventory == null) return;
 
             try
             {
                 // Get ActiveCharacter from game session
-                var activeCharProp = cachedGameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                var activeCharProp = GameDataCache.GameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                 if (activeCharProp == null) return;
 
-                var activeChar = activeCharProp.GetValue(cachedGameSession);
+                var activeChar = activeCharProp.GetValue(GameDataCache.GameSession);
                 if (activeChar == null) return;
 
                 // Get weapons from WeaponsManager.ActiveEquipment
@@ -2029,13 +1818,13 @@ namespace VSItemTooltips
 
         public static bool HasCachedDataManager()
         {
-            return cachedDataManager != null;
+            return GameDataCache.DataManager != null;
         }
 
         // Static version of data manager caching for use outside OnUpdate
         private static void TryCacheDataManagerStatic()
         {
-            if (cachedDataManager != null) return;
+            if (GameDataCache.DataManager != null) return;
 
             try
             {
@@ -3323,7 +3112,7 @@ namespace VSItemTooltips
             string description = "";
             UnityEngine.Sprite itemSprite = null;
 
-            if (weaponType.HasValue && cachedWeaponsDict != null)
+            if (weaponType.HasValue && GameDataCache.WeaponsDict != null)
             {
                 var data = GetWeaponData(weaponType.Value);
                 if (data != null)
@@ -3333,7 +3122,7 @@ namespace VSItemTooltips
                     itemSprite = GetSpriteForWeapon(weaponType.Value);
                 }
             }
-            else if (itemType.HasValue && cachedPowerUpsDict != null)
+            else if (itemType.HasValue && GameDataCache.PowerUpsDict != null)
             {
                 var data = GetPowerUpData(itemType.Value);
                 if (data != null)
@@ -3598,17 +3387,17 @@ namespace VSItemTooltips
         // Check if player owns a weapon
         private static bool PlayerOwnsWeapon(WeaponType weaponType)
         {
-            if (cachedGameSession == null)
+            if (GameDataCache.GameSession == null)
             {
                 return false;
             }
 
             try
             {
-                var activeCharProp = cachedGameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                var activeCharProp = GameDataCache.GameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                 if (activeCharProp == null) return false;
 
-                var activeChar = activeCharProp.GetValue(cachedGameSession);
+                var activeChar = activeCharProp.GetValue(GameDataCache.GameSession);
                 if (activeChar == null) return false;
 
                 var weaponsManagerProp = activeChar.GetType().GetProperty("WeaponsManager", BindingFlags.Public | BindingFlags.Instance);
@@ -3663,14 +3452,14 @@ namespace VSItemTooltips
         // Check if player owns a passive item
         private static bool PlayerOwnsItem(ItemType itemType)
         {
-            if (cachedGameSession == null) return false;
+            if (GameDataCache.GameSession == null) return false;
 
             try
             {
-                var activeCharProp = cachedGameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                var activeCharProp = GameDataCache.GameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                 if (activeCharProp == null) return false;
 
-                var activeChar = activeCharProp.GetValue(cachedGameSession);
+                var activeChar = activeCharProp.GetValue(GameDataCache.GameSession);
                 if (activeChar == null) return false;
 
                 var accessoriesManagerProp = activeChar.GetType().GetProperty("AccessoriesManager", BindingFlags.Public | BindingFlags.Instance);
@@ -3714,14 +3503,14 @@ namespace VSItemTooltips
         // Passive items like Wings have WeaponType entries but are in the accessories slot.
         private static bool PlayerOwnsAccessory(WeaponType weaponType)
         {
-            if (cachedGameSession == null) return false;
+            if (GameDataCache.GameSession == null) return false;
 
             try
             {
-                var activeCharProp = cachedGameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                var activeCharProp = GameDataCache.GameSession.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
                 if (activeCharProp == null) return false;
 
-                var activeChar = activeCharProp.GetValue(cachedGameSession);
+                var activeChar = activeCharProp.GetValue(GameDataCache.GameSession);
                 if (activeChar == null) return false;
 
                 var accessoriesManagerProp = activeChar.GetType().GetProperty("AccessoriesManager", BindingFlags.Public | BindingFlags.Instance);
@@ -3960,9 +3749,9 @@ namespace VSItemTooltips
         private static int CountPassiveUses(WeaponType passiveType, string ownEvoInto = null)
         {
             // Use cache if available (fast O(1) lookup)
-            if (evolutionCache != null)
+            if (GameDataCache.EvolutionCache != null)
             {
-                return evolutionCache.CountPassiveUsages(passiveType, ownEvoInto);
+                return GameDataCache.EvolutionCache.CountPassiveUsages(passiveType, ownEvoInto);
             }
 
             // Fallback: return 0 if cache not built yet
@@ -3972,11 +3761,11 @@ namespace VSItemTooltips
         private static float AddWeaponEvolutionSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, WeaponType weaponType, float yOffset, float maxWidth)
         {
             // Use cache for fast lookup if available
-            if (evolutionCache != null)
+            if (GameDataCache.EvolutionCache != null)
             {
                 // Count how many OTHER weapons use this one as a passive ingredient
                 // (cache handles dual-weapon partner filtering automatically)
-                int passiveUseCount = evolutionCache.CountPassiveUsages(weaponType);
+                int passiveUseCount = GameDataCache.EvolutionCache.CountPassiveUsages(weaponType);
 
                 // If this weapon is genuinely used as a passive in multiple other recipes,
                 // show the passive section with all formulas (including own evolution).
@@ -3991,7 +3780,7 @@ namespace VSItemTooltips
                 yOffset = AddEvolvedFromSection(parent, font, weaponType, yOffset, maxWidth);
 
                 // Get this weapon's own evolution from cache - O(1) lookup
-                var cachedFormula = evolutionCache.GetForWeapon(weaponType);
+                var cachedFormula = GameDataCache.EvolutionCache.GetForWeapon(weaponType);
                 if (cachedFormula == null) return yOffset; // No evolution
 
                 // Parse evolved weapon type
@@ -4131,9 +3920,9 @@ namespace VSItemTooltips
         private static float AddEvolvedFromSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, WeaponType evolvedType, float yOffset, float maxWidth)
         {
             // Use cache for fast lookup if available
-            if (evolutionCache != null)
+            if (GameDataCache.EvolutionCache != null)
             {
-                var cachedFormula = evolutionCache.GetForEvolvedWeapon(evolvedType);
+                var cachedFormula = GameDataCache.EvolutionCache.GetForEvolvedWeapon(evolvedType);
                 if (cachedFormula == null) return yOffset;
 
                 // Parse base weapon type from cached formula
@@ -4276,13 +4065,13 @@ namespace VSItemTooltips
             // Use cache for fast O(1) lookup if available
             var formulas = new System.Collections.Generic.List<EvolutionFormula>();
 
-            if (evolutionCache != null)
+            if (GameDataCache.EvolutionCache != null)
             {
                 // Get all formulas that use this weapon as a passive - O(1) cache lookup
                 // This includes both:
                 // 1. Other weapons that use this as a passive (e.g., Whip uses Hollow Heart)
                 // 2. This weapon's own evolution if it has one (e.g., Shadow Pinion → Valkyrie Turner)
-                var cachedFormulas = evolutionCache.GetFormulasUsingWeaponAsPassive(passiveType);
+                var cachedFormulas = GameDataCache.EvolutionCache.GetFormulasUsingWeaponAsPassive(passiveType);
 
                 // Convert cached formulas to UI format with sprites and ownership data
                 foreach (var cachedFormula in cachedFormulas)
@@ -4452,10 +4241,10 @@ namespace VSItemTooltips
             // Use cache for fast O(1) lookup if available
             var formulas = new System.Collections.Generic.List<EvolutionFormula>();
 
-            if (evolutionCache != null)
+            if (GameDataCache.EvolutionCache != null)
             {
                 // Get all formulas that use this item as a passive - O(1) cache lookup
-                var cachedFormulas = evolutionCache.GetFormulasUsingItemAsPassive(itemType);
+                var cachedFormulas = GameDataCache.EvolutionCache.GetFormulasUsingItemAsPassive(itemType);
 
                 // Convert cached formulas to UI format with sprites and ownership data
                 foreach (var cachedFormula in cachedFormulas)
@@ -4943,13 +4732,13 @@ namespace VSItemTooltips
 
         private static Il2CppSystem.Collections.Generic.List<WeaponData> GetWeaponDataList(WeaponType type)
         {
-            if (cachedWeaponsDict == null) return null;
+            if (GameDataCache.WeaponsDict == null) return null;
             try
             {
-                var indexer = cachedWeaponsDict.GetType().GetProperty("Item");
+                var indexer = GameDataCache.WeaponsDict.GetType().GetProperty("Item");
                 if (indexer != null)
                 {
-                    return indexer.GetValue(cachedWeaponsDict, new object[] { type }) as Il2CppSystem.Collections.Generic.List<WeaponData>;
+                    return indexer.GetValue(GameDataCache.WeaponsDict, new object[] { type }) as Il2CppSystem.Collections.Generic.List<WeaponData>;
                 }
             }
             catch { }
@@ -5192,7 +4981,7 @@ namespace VSItemTooltips
             currentCollectionPopupData = (weaponType, itemType, arcanaType);
 
             // Try to cache data if not cached yet (needed for popup content)
-            if (cachedDataManager == null)
+            if (GameDataCache.DataManager == null)
             {
                 TryCacheDataManagerStatic();
             }
@@ -5418,7 +5207,7 @@ namespace VSItemTooltips
         /// </summary>
         public static System.Type GetCachedArcanaTypeEnum()
         {
-            return cachedArcanaTypeEnum;
+            return GameDataCache.ArcanaTypeEnum;
         }
 
         /// <summary>
@@ -5567,19 +5356,19 @@ namespace VSItemTooltips
 
         public static WeaponData GetWeaponData(WeaponType type)
         {
-            if (cachedWeaponsDict == null) return null;
+            if (GameDataCache.WeaponsDict == null) return null;
 
             try
             {
-                var dictType = cachedWeaponsDict.GetType();
+                var dictType = GameDataCache.WeaponsDict.GetType();
                 var containsMethod = dictType.GetMethod("ContainsKey");
-                if (containsMethod != null && (bool)containsMethod.Invoke(cachedWeaponsDict, new object[] { type }))
+                if (containsMethod != null && (bool)containsMethod.Invoke(GameDataCache.WeaponsDict, new object[] { type }))
                 {
                     var indexer = dictType.GetProperty("Item");
                     if (indexer != null)
                     {
                         // Dictionary value is List<WeaponData>, get the first item
-                        var list = indexer.GetValue(cachedWeaponsDict, new object[] { type }) as Il2CppSystem.Collections.Generic.List<WeaponData>;
+                        var list = indexer.GetValue(GameDataCache.WeaponsDict, new object[] { type }) as Il2CppSystem.Collections.Generic.List<WeaponData>;
                         if (list != null && list.Count > 0)
                         {
                             return list[0];
@@ -5594,18 +5383,18 @@ namespace VSItemTooltips
 
         public static object GetPowerUpData(ItemType type)
         {
-            if (cachedPowerUpsDict == null) return null;
+            if (GameDataCache.PowerUpsDict == null) return null;
 
             try
             {
-                var dictType = cachedPowerUpsDict.GetType();
+                var dictType = GameDataCache.PowerUpsDict.GetType();
                 var containsMethod = dictType.GetMethod("ContainsKey");
-                if (containsMethod != null && (bool)containsMethod.Invoke(cachedPowerUpsDict, new object[] { type }))
+                if (containsMethod != null && (bool)containsMethod.Invoke(GameDataCache.PowerUpsDict, new object[] { type }))
                 {
                     var indexer = dictType.GetProperty("Item");
                     if (indexer != null)
                     {
-                        var listObj = indexer.GetValue(cachedPowerUpsDict, new object[] { type });
+                        var listObj = indexer.GetValue(GameDataCache.PowerUpsDict, new object[] { type });
                         // Dictionary value is List<PowerUpData>, get the first item
                         if (listObj != null)
                         {
@@ -5964,7 +5753,7 @@ namespace VSItemTooltips
 
         private static object GetGameManager()
         {
-            if (cachedGameManager != null) return cachedGameManager;
+            if (GameDataCache.GameManager != null) return GameDataCache.GameManager;
 
             try
             {
@@ -5977,8 +5766,8 @@ namespace VSItemTooltips
                 if (findMethod == null) return null;
 
                 var genericFind = findMethod.MakeGenericMethod(gameManagerType);
-                cachedGameManager = genericFind.Invoke(null, null);
-                return cachedGameManager;
+                GameDataCache.SetGameManager(genericFind.Invoke(null, null));
+                return GameDataCache.GameManager;
             }
             catch
             {
@@ -5993,11 +5782,11 @@ namespace VSItemTooltips
             {
                 var assembly = typeof(WeaponData).Assembly;
 
-                if (cachedArcanaTypeEnum == null)
+                if (GameDataCache.ArcanaTypeEnum == null)
                 {
-                    cachedArcanaTypeEnum = assembly.GetTypes().FirstOrDefault(t => t.Name == "ArcanaType");
+                    GameDataCache.SetArcanaTypeEnum(assembly.GetTypes().FirstOrDefault(t => t.Name == "ArcanaType"));
                 }
-                if (cachedArcanaTypeEnum == null) return result;
+                if (GameDataCache.ArcanaTypeEnum == null) return result;
 
                 var gameMgr = GetGameManager();
                 if (gameMgr == null) return result;
@@ -6176,7 +5965,7 @@ namespace VSItemTooltips
 
                 var selectedArcanaInt = (int)selectedArcanaProp.GetValue(config);
 
-                var arcanaValues = System.Enum.GetValues(cachedArcanaTypeEnum);
+                var arcanaValues = System.Enum.GetValues(GameDataCache.ArcanaTypeEnum);
                 foreach (var val in arcanaValues)
                 {
                     if ((int)val == selectedArcanaInt)
@@ -6221,10 +6010,10 @@ namespace VSItemTooltips
         {
             try
             {
-                if (cachedDataManager == null || arcanaType == null) return null;
+                if (GameDataCache.DataManager == null || arcanaType == null) return null;
 
                 // Get AllArcanas from GameDataCache (handles caching internally)
-                var allArcanas = cachedAllArcanas;
+                var allArcanas = GameDataCache.GetAllArcanas();
                 if (allArcanas == null) return null;
 
                 var indexer = allArcanas.GetType().GetProperty("Item");
@@ -6460,7 +6249,7 @@ namespace VSItemTooltips
         private static void ScanArcanaUI(int arcanaTypeInt, string arcanaName)
         {
             if (arcanaUICache.ContainsKey(arcanaTypeInt)) return;
-            if (!lookupTablesBuilt || spriteToWeaponType == null || spriteToItemType == null) return;
+            if (!GameDataCache.LookupTablesBuilt || GameDataCache.SpriteToWeaponType == null || GameDataCache.SpriteToItemType == null) return;
 
             var weapons = new HashSet<WeaponType>();
             var items = new HashSet<ItemType>();
@@ -6543,13 +6332,13 @@ namespace VSItemTooltips
                         cleanName = cleanName.Substring(0, cleanName.Length - 4);
 
                     // Check both original and cleaned names against lookup tables
-                    if (spriteToWeaponType.TryGetValue(spriteName, out var wt))
+                    if (GameDataCache.SpriteToWeaponType.TryGetValue(spriteName, out var wt))
                         weapons.Add(wt);
-                    else if (spriteToWeaponType.TryGetValue(cleanName, out var wt2))
+                    else if (GameDataCache.SpriteToWeaponType.TryGetValue(cleanName, out var wt2))
                         weapons.Add(wt2);
-                    else if (spriteToItemType.TryGetValue(spriteName, out var it))
+                    else if (GameDataCache.SpriteToItemType.TryGetValue(spriteName, out var it))
                         items.Add(it);
-                    else if (spriteToItemType.TryGetValue(cleanName, out var it2))
+                    else if (GameDataCache.SpriteToItemType.TryGetValue(cleanName, out var it2))
                         items.Add(it2);
                 }
 
