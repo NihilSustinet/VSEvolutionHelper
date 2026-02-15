@@ -4139,139 +4139,144 @@ namespace VSItemTooltips
 
         /// <summary>
         /// For evolved weapons, shows what base weapon + passives created this evolution.
-        /// Reverse-lookups: finds base weapons whose evoInto matches the current weapon type.
+        /// Now uses EvolutionFormulaCache for O(1) lookup instead of O(n) iteration.
         /// </summary>
         private static float AddEvolvedFromSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, WeaponType evolvedType, float yOffset, float maxWidth)
         {
-            if (cachedWeaponsDict == null) return yOffset;
-
-            string evolvedTypeStr = evolvedType.ToString();
-            EvolutionFormula? foundFormula = null;
-
-            try
+            // Use cache for fast lookup if available
+            if (evolutionCache != null)
             {
-                var keysProperty = cachedWeaponsDict.GetType().GetProperty("Keys");
-                if (keysProperty == null) return yOffset;
+                var cachedFormula = evolutionCache.GetForEvolvedWeapon(evolvedType);
+                if (cachedFormula == null) return yOffset;
 
-                var keys = keysProperty.GetValue(cachedWeaponsDict);
-                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
-                var moveNext = enumerator.GetType().GetMethod("MoveNext");
-                var current = enumerator.GetType().GetProperty("Current");
+                // Parse base weapon type from cached formula
+                if (!System.Enum.TryParse<WeaponType>(cachedFormula.BaseWeaponId, out var baseWeaponType))
+                    return yOffset;
 
-                while ((bool)moveNext.Invoke(enumerator, null))
+                // Build UI-specific formula with sprites and ownership data
+                var uiFormula = new EvolutionFormula
                 {
-                    var weaponType = (WeaponType)current.GetValue(enumerator);
-                    var weaponDataList = GetWeaponDataList(weaponType);
-                    if (weaponDataList == null) continue;
+                    BaseWeapon = baseWeaponType,
+                    EvolvedWeapon = evolvedType,
+                    BaseName = cachedFormula.BaseWeaponName,
+                    EvolvedName = cachedFormula.EvolvedWeaponName,
+                    BaseSprite = GetSpriteForWeapon(baseWeaponType),
+                    EvolvedSprite = GetSpriteForWeapon(evolvedType),
+                    Passives = new System.Collections.Generic.List<PassiveRequirement>()
+                };
 
-                    for (int i = 0; i < weaponDataList.Count; i++)
+                // Convert cached passive requirements to UI requirements with sprites/ownership
+                if (cachedFormula.RequiredPassives != null)
+                {
+                    foreach (var cachedPassive in cachedFormula.RequiredPassives)
                     {
-                        var weaponData = weaponDataList[i];
-                        if (weaponData == null) continue;
-
-                        try
+                        var uiPassive = new PassiveRequirement
                         {
-                            string evoInto = GetPropertyValue<string>(weaponData, "evoInto");
-                            if (string.IsNullOrEmpty(evoInto) || evoInto != evolvedTypeStr) continue;
+                            RequiresMaxLevel = cachedPassive.RequiresMaxLevel
+                        };
 
-                            var synergyProp = weaponData.GetType().GetProperty("evoSynergy");
-                            if (synergyProp == null) continue;
-
-                            var synergy = synergyProp.GetValue(weaponData) as Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType>;
-
-                            foundFormula = new EvolutionFormula
+                        // Parse weapon or item type
+                        if (!string.IsNullOrEmpty(cachedPassive.WeaponId))
+                        {
+                            if (System.Enum.TryParse<WeaponType>(cachedPassive.WeaponId, out var passiveWeaponType))
                             {
-                                BaseWeapon = weaponType,
-                                Passives = CollectPassiveRequirements(synergy, GetRequiresMaxFromEvolved(evoInto)),
-                                EvolvedWeapon = evolvedType,
-                                BaseName = GetLocalizedWeaponName(weaponData, weaponType),
-                                BaseSprite = GetSpriteForWeapon(weaponType),
-                                EvolvedSprite = GetSpriteForWeapon(evolvedType)
-                            };
-                            break;
+                                uiPassive.WeaponType = passiveWeaponType;
+                                uiPassive.Sprite = GetSpriteForWeapon(passiveWeaponType);
+                                uiPassive.Owned = PlayerOwnsWeapon(passiveWeaponType) || PlayerOwnsAccessory(passiveWeaponType);
+                            }
                         }
-                        catch { }
+                        else if (!string.IsNullOrEmpty(cachedPassive.ItemId))
+                        {
+                            if (System.Enum.TryParse<ItemType>(cachedPassive.ItemId, out var passiveItemType))
+                            {
+                                uiPassive.ItemType = passiveItemType;
+                                uiPassive.Sprite = GetSpriteForItem(passiveItemType);
+                                uiPassive.Owned = PlayerOwnsItem(passiveItemType);
+                            }
+                        }
+
+                        uiFormula.Passives.Add(uiPassive);
                     }
-                    if (foundFormula.HasValue) break;
                 }
-            }
-            catch { }
 
-            if (!foundFormula.HasValue) return yOffset;
+                // Now render the formula using the existing rendering code below
+                var formula = uiFormula;
 
-            var formula = foundFormula.Value;
+                // Add section header
+                yOffset -= Spacing;
+                var headerObj = CreateTextElement(parent, "EvolvedFromHeader", "Evolved from: (click for details)", font, 14f,
+                    new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
+                var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
+                headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
+                headerRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                headerRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
+                headerRect.sizeDelta = new UnityEngine.Vector2(maxWidth - Padding * 2, 20f);
+                yOffset -= 22f;
 
-            // Add section header
-            yOffset -= Spacing;
-            var headerObj = CreateTextElement(parent, "EvolvedFromHeader", "Evolved from: (click for details)", font, 14f,
-                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
-            var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
-            headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
-            headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
-            headerRect.pivot = new UnityEngine.Vector2(0f, 1f);
-            headerRect.anchoredPosition = new UnityEngine.Vector2(Padding, yOffset);
-            headerRect.sizeDelta = new UnityEngine.Vector2(maxWidth - Padding * 2, 20f);
-            yOffset -= 22f;
+                // Create formula row: [Base Weapon] + [Passive1] + [Passive2]
+                float iconSize = 36f;
+                bool hasMaxReqRow = formula.Passives != null && formula.Passives.Exists(p => p.RequiresMaxLevel);
+                float rowHeight = iconSize + 4f + (hasMaxReqRow ? 12f : 0f);
+                float xOffset = Padding + 5f;
 
-            // Create formula row: [Base Weapon] + [Passive1] + [Passive2]
-            float iconSize = 36f;
-            bool hasMaxReqRow = formula.Passives != null && formula.Passives.Exists(p => p.RequiresMaxLevel);
-            float rowHeight = iconSize + 4f + (hasMaxReqRow ? 12f : 0f);
-            float xOffset = Padding + 5f;
+                // Base weapon icon
+                bool ownsWeapon = PlayerOwnsWeapon(formula.BaseWeapon);
+                var weaponIcon = CreateFormulaIcon(parent, "EvolvedFromBase", formula.BaseSprite, ownsWeapon, IsWeaponBanned(formula.BaseWeapon), iconSize, xOffset, yOffset);
+                AddHoverToGameObject(weaponIcon, formula.BaseWeapon, null, useClick: true);
+                xOffset += iconSize + 3f;
 
-            // Base weapon icon
-            bool ownsWeapon = PlayerOwnsWeapon(formula.BaseWeapon);
-            var weaponIcon = CreateFormulaIcon(parent, "EvolvedFromBase", formula.BaseSprite, ownsWeapon, IsWeaponBanned(formula.BaseWeapon), iconSize, xOffset, yOffset);
-            AddHoverToGameObject(weaponIcon, formula.BaseWeapon, null, useClick: true);
-            xOffset += iconSize + 3f;
-
-            // Passive requirements
-            if (formula.Passives != null)
-            {
-                for (int p = 0; p < formula.Passives.Count; p++)
+                // Passive requirements
+                if (formula.Passives != null)
                 {
-                    var passive = formula.Passives[p];
-
-                    // Plus sign
-                    var plusObj = CreateTextElement(parent, $"EvolvedFromPlus{p}", "+", font, 14f,
-                        new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
-                    var plusRect = plusObj.GetComponent<UnityEngine.RectTransform>();
-                    plusRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
-                    plusRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
-                    plusRect.pivot = new UnityEngine.Vector2(0f, 1f);
-                    plusRect.anchoredPosition = new UnityEngine.Vector2(xOffset, yOffset - 4f);
-                    plusRect.sizeDelta = new UnityEngine.Vector2(14f, iconSize);
-                    xOffset += 14f;
-
-                    // Passive icon
-                    bool efPassiveBanned = passive.WeaponType.HasValue ? IsWeaponBanned(passive.WeaponType.Value) :
-                        passive.ItemType.HasValue ? IsItemBanned(passive.ItemType.Value) : false;
-                    var passiveIcon = CreateFormulaIcon(parent, $"EvolvedFromPassive{p}", passive.Sprite, passive.Owned, efPassiveBanned, iconSize, xOffset, yOffset);
-                    if (passive.WeaponType.HasValue)
-                        AddHoverToGameObject(passiveIcon, passive.WeaponType.Value, null, useClick: true);
-                    else if (passive.ItemType.HasValue)
-                        AddHoverToGameObject(passiveIcon, null, passive.ItemType.Value, useClick: true);
-
-                    // "MAX" label below passive icon if required
-                    if (passive.RequiresMaxLevel)
+                    for (int p = 0; p < formula.Passives.Count; p++)
                     {
-                        var maxObj = CreateTextElement(parent, $"EvolvedFromMax{p}", "MAX", font, 9f,
-                            new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
-                        var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
-                        maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
-                        maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
-                        maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
-                        maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
-                        maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
-                        var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
-                        if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
-                    }
+                        var passive = formula.Passives[p];
 
-                    xOffset += iconSize + 3f;
+                        // Plus sign
+                        var plusObj = CreateTextElement(parent, $"EvolvedFromPlus{p}", "+", font, 14f,
+                            new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
+                        var plusRect = plusObj.GetComponent<UnityEngine.RectTransform>();
+                        plusRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                        plusRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                        plusRect.pivot = new UnityEngine.Vector2(0f, 1f);
+                        plusRect.anchoredPosition = new UnityEngine.Vector2(xOffset, yOffset - 4f);
+                        plusRect.sizeDelta = new UnityEngine.Vector2(14f, iconSize);
+                        xOffset += 14f;
+
+                        // Passive icon
+                        bool efPassiveBanned = passive.WeaponType.HasValue ? IsWeaponBanned(passive.WeaponType.Value) :
+                            passive.ItemType.HasValue ? IsItemBanned(passive.ItemType.Value) : false;
+                        var passiveIcon = CreateFormulaIcon(parent, $"EvolvedFromPassive{p}", passive.Sprite, passive.Owned, efPassiveBanned, iconSize, xOffset, yOffset);
+                        if (passive.WeaponType.HasValue)
+                            AddHoverToGameObject(passiveIcon, passive.WeaponType.Value, null, useClick: true);
+                        else if (passive.ItemType.HasValue)
+                            AddHoverToGameObject(passiveIcon, null, passive.ItemType.Value, useClick: true);
+
+                        // "MAX" label below passive icon if required
+                        if (passive.RequiresMaxLevel)
+                        {
+                            var maxObj = CreateTextElement(parent, $"EvolvedFromMax{p}", "MAX", font, 9f,
+                                new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                            var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
+                            maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
+                            maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
+                            maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
+                            maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
+                            maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
+                            var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
+                            if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                        }
+
+                        xOffset += iconSize + 3f;
+                    }
                 }
+
+                yOffset -= rowHeight;
+                return yOffset;
             }
 
-            yOffset -= rowHeight;
+            // Fallback: cache not available, return without showing section
             return yOffset;
         }
 
