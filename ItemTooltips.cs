@@ -109,7 +109,6 @@ namespace VSItemTooltips
         private static readonly UnityEngine.Color PopupBgColor = new UnityEngine.Color(0.08f, 0.08f, 0.12f, 0.98f);
         private static readonly UnityEngine.Color PopupBorderColor = new UnityEngine.Color(0.5f, 0.5f, 0.7f, 1f);
         private static readonly float IconSize = 48f;
-        private static readonly float SmallIconSize = 40f;
         private static readonly float Padding = 12f;
         private static readonly float Spacing = 8f;
 
@@ -356,8 +355,6 @@ namespace VSItemTooltips
             }
         }
 
-        private static float lastTimeScaleLog = 0f;
-        private static bool escWasPressed = false;
         private static bool triedEarlyCaching = false;
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
@@ -529,8 +526,6 @@ namespace VSItemTooltips
             // Detect ESC key press to find pause menu
             if (UnityEngine.Input.GetKeyDown(UnityEngine.KeyCode.Escape))
             {
-                escWasPressed = true;
-
                 // Search for Safe Area and find pause view
                 var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
                 if (safeArea != null)
@@ -7474,7 +7469,7 @@ namespace VSItemTooltips
                         }
                     }
                 }
-                catch (Exception ex)
+                catch
                 {
                 }
             }
