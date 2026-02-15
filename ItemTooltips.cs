@@ -4530,119 +4530,71 @@ namespace VSItemTooltips
 
         private static float AddItemEvolutionSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, ItemType itemType, float yOffset, float maxWidth)
         {
-            // For items/powerups, find ALL weapons that use this item to evolve
-            if (cachedWeaponsDict == null)
-            {
-                return yOffset;
-            }
-
-
+            // Use cache for fast O(1) lookup if available
             var formulas = new System.Collections.Generic.List<EvolutionFormula>();
-            int weaponsChecked = 0;
-            int matchesFound = 0;
 
-            try
+            if (evolutionCache != null)
             {
-                var keysProperty = cachedWeaponsDict.GetType().GetProperty("Keys");
-                if (keysProperty == null) return yOffset;
+                // Get all formulas that use this item as a passive - O(1) cache lookup
+                var cachedFormulas = evolutionCache.GetFormulasUsingItemAsPassive(itemType);
 
-                var keys = keysProperty.GetValue(cachedWeaponsDict);
-                var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
-                var moveNext = enumerator.GetType().GetMethod("MoveNext");
-                var current = enumerator.GetType().GetProperty("Current");
-
-                while ((bool)moveNext.Invoke(enumerator, null))
+                // Convert cached formulas to UI format with sprites and ownership data
+                foreach (var cachedFormula in cachedFormulas)
                 {
-                    weaponsChecked++;
-                    var weaponType = (WeaponType)current.GetValue(enumerator);
-                    var weaponDataList = GetWeaponDataList(weaponType);
-                    if (weaponDataList == null) continue;
+                    // Parse base and evolved weapon types
+                    if (!System.Enum.TryParse<WeaponType>(cachedFormula.BaseWeaponId, out var baseWeaponType))
+                        continue;
+                    if (!System.Enum.TryParse<WeaponType>(cachedFormula.EvolvedWeaponId, out var evolvedWeaponType))
+                        continue;
 
-                    for (int i = 0; i < weaponDataList.Count; i++)
+                    // Build UI formula with sprites and ownership
+                    var uiFormula = new EvolutionFormula
                     {
-                        var weaponData = weaponDataList[i];
-                        if (weaponData == null) continue;
+                        BaseWeapon = baseWeaponType,
+                        EvolvedWeapon = evolvedWeaponType,
+                        BaseName = cachedFormula.BaseWeaponName,
+                        EvolvedName = cachedFormula.EvolvedWeaponName,
+                        BaseSprite = GetSpriteForWeapon(baseWeaponType),
+                        EvolvedSprite = GetSpriteForWeapon(evolvedWeaponType),
+                        Passives = new System.Collections.Generic.List<PassiveRequirement>()
+                    };
 
-                        try
+                    // Convert cached passives to UI passives with sprites/ownership
+                    if (cachedFormula.RequiredPassives != null)
+                    {
+                        foreach (var cachedPassive in cachedFormula.RequiredPassives)
                         {
-                            var synergyProp = weaponData.GetType().GetProperty("evoSynergy");
-                            if (synergyProp == null) continue;
-
-                            var synergy = synergyProp.GetValue(weaponData) as Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<WeaponType>;
-                            if (synergy == null || synergy.Length == 0) continue;
-
-                            // Log what this weapon's synergy contains
-                            string evoIntoCheck = GetPropertyValue<string>(weaponData, "evoInto");
-                            if (!string.IsNullOrEmpty(evoIntoCheck))
+                            var uiPassive = new PassiveRequirement
                             {
-                                string synergyContents = "";
-                                for (int s = 0; s < synergy.Length; s++)
+                                RequiresMaxLevel = cachedPassive.RequiresMaxLevel
+                            };
+
+                            if (!string.IsNullOrEmpty(cachedPassive.WeaponId))
+                            {
+                                if (System.Enum.TryParse<WeaponType>(cachedPassive.WeaponId, out var passiveWeaponType))
                                 {
-                                    synergyContents += synergy[s].ToString() + " ";
+                                    uiPassive.WeaponType = passiveWeaponType;
+                                    uiPassive.Sprite = GetSpriteForWeapon(passiveWeaponType);
+                                    uiPassive.Owned = PlayerOwnsWeapon(passiveWeaponType) || PlayerOwnsAccessory(passiveWeaponType);
+                                }
+                            }
+                            else if (!string.IsNullOrEmpty(cachedPassive.ItemId))
+                            {
+                                if (System.Enum.TryParse<ItemType>(cachedPassive.ItemId, out var passiveItemType))
+                                {
+                                    uiPassive.ItemType = passiveItemType;
+                                    uiPassive.Sprite = GetSpriteForItem(passiveItemType);
+                                    uiPassive.Owned = PlayerOwnsItem(passiveItemType);
                                 }
                             }
 
-                            // Check if this item type is in the synergy list
-                            string itemTypeStr = itemType.ToString();
-                            bool found = false;
-                            for (int j = 0; j < synergy.Length; j++)
-                            {
-                                if (synergy[j].ToString() == itemTypeStr)
-                                {
-                                    found = true;
-                                    break;
-                                }
-                            }
-
-                            if (found)
-                            {
-                                matchesFound++;
-                                string evoInto = GetPropertyValue<string>(weaponData, "evoInto");
-                                if (string.IsNullOrEmpty(evoInto)) continue;
-
-                                if (System.Enum.TryParse<WeaponType>(evoInto, out var evoType))
-                                {
-
-                                    var formula = new EvolutionFormula
-                                    {
-                                        BaseWeapon = weaponType,
-                                        Passives = CollectPassiveRequirements(synergy, GetRequiresMaxFromEvolved(evoInto)),
-                                        EvolvedWeapon = evoType,
-                                        BaseName = GetLocalizedWeaponName(weaponData, weaponType),
-                                        BaseSprite = GetSpriteForWeapon(weaponType),
-                                        EvolvedSprite = GetSpriteForWeapon(evoType)
-                                    };
-
-                                    var evoData = GetWeaponData(evoType);
-                                    if (evoData != null)
-                                        formula.EvolvedName = GetLocalizedWeaponName(evoData, evoType);
-                                    else
-                                        formula.EvolvedName = evoInto;
-
-                                    // Avoid duplicates - dedup by EvolvedWeapon since multi-passive
-                                    // recipes appear once per base weapon but are the same evolution
-                                    bool isDupe = false;
-                                    foreach (var f in formulas)
-                                    {
-                                        if (f.EvolvedWeapon == formula.EvolvedWeapon)
-                                        {
-                                            isDupe = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!isDupe) formulas.Add(formula);
-                                }
-                            }
+                            uiFormula.Passives.Add(uiPassive);
                         }
-                        catch { }
                     }
+
+                    formulas.Add(uiFormula);
                 }
             }
-            catch (Exception ex)
-            {
-                MelonLogger.Warning($"[AddItemEvo] Error: {ex.Message}");
-            }
-
 
             if (formulas.Count == 0) return yOffset;
 
