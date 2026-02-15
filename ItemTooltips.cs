@@ -3560,7 +3560,7 @@ namespace VSItemTooltips
         /// Reads 'requiresMax' from the evolved weapon's data and returns a set of WeaponType int values
         /// indicating which synergy passives need to be at max level.
         /// </summary>
-        private static System.Collections.Generic.HashSet<int> GetRequiresMaxFromEvolved(string evoInto)
+        public static HashSet<int> GetRequiresMaxFromEvolved(string evoInto)
         {
             if (string.IsNullOrEmpty(evoInto)) return null;
             if (!System.Enum.TryParse<WeaponType>(evoInto, out var evoType)) return null;
@@ -3773,7 +3773,7 @@ namespace VSItemTooltips
         /// Checks if a weapon type has been banished by the player.
         /// Accesses GameManager.LevelUpFactory.BanishedWeapons via reflection.
         /// </summary>
-        private static bool IsWeaponBanned(WeaponType weaponType)
+        public static bool IsWeaponBanned(WeaponType weaponType)
         {
             try
             {
@@ -3827,7 +3827,7 @@ namespace VSItemTooltips
         /// Checks if an item type has been banished by the player.
         /// Accesses GameManager.LevelUpFactory.BanishedPowerUps via reflection.
         /// </summary>
-        private static bool IsItemBanned(ItemType itemType)
+        public static bool IsItemBanned(ItemType itemType)
         {
             try
             {
@@ -5140,12 +5140,10 @@ namespace VSItemTooltips
             var popupParent = popup.transform.parent;
             if (popupParent == null) return;
 
-            // Position relative to anchor, but offset so the popup appears
-            // with the mouse cursor inside it (near top-left of popup)
+            // Convert anchor position to local space
             var localPos = popupParent.InverseTransformPoint(anchor.position);
 
-            // Convert from pivot-relative (InverseTransformPoint) to anchor-relative (anchoredPosition)
-            // This accounts for parents whose pivot isn't at center
+            // Convert from pivot-relative to anchor-relative
             var parentRect = popupParent.GetComponent<UnityEngine.RectTransform>();
             if (parentRect != null)
             {
@@ -5154,82 +5152,19 @@ namespace VSItemTooltips
                 localPos.y -= anchorOffset.y;
             }
 
-            // Initial position - offset so mouse ends up inside the popup
-            // In controller mode, shift the first popup left so it doesn't overlap cards.
-            // Recursive popups (popupStack > 0) should appear near the formula icon instead.
-            float posX, posY;
-            if (usingController && equipmentNavMode && !interactiveMode && popupStack.Count <= 1)
-            {
-                // Equipment nav popup — slightly right of anchor, below the equipment rows
-                posX = localPos.x + 40f;
-                posY = localPos.y - 60f;
-            }
-            else if (usingController && popupStack.Count <= 1 && !interactiveMode)
-            {
-                // First popup from dwell — shift left of anchor (but not too far)
-                posX = localPos.x - (popupRect.sizeDelta.x * 0.5f);
-                posY = localPos.y + 15f;
-            }
-            else if (usingController)
-            {
-                // Recursive popup — slight offset down-right from formula icon
-                posX = localPos.x + 15f;
-                posY = localPos.y + 15f;
-            }
-            else
-            {
-                posX = localPos.x - 15f;
-                posY = localPos.y + 40f;
-            }
+            // Use PopupPositionCalculator from Core (tested!)
+            float parentWidth = parentRect != null ? parentRect.rect.width : 1920f;
+            float parentHeight = parentRect != null ? parentRect.rect.height : 1080f;
 
-            // Get popup size
-            float popupWidth = popupRect.sizeDelta.x;
-            float popupHeight = popupRect.sizeDelta.y;
+            var calculator = new VSItemTooltips.Core.Models.PopupPositionCalculator(parentWidth, parentHeight);
 
-            // Clamp to parent bounds
-            if (parentRect != null)
-            {
-                float parentWidth = parentRect.rect.width;
-                float parentHeight = parentRect.rect.height;
-
-                // Clamp to keep popup within parent bounds
-                // Right edge
-                if (posX + popupWidth > parentWidth / 2)
-                {
-                    posX = parentWidth / 2 - popupWidth;
-                }
-                // Left edge
-                if (posX < -parentWidth / 2)
-                {
-                    posX = -parentWidth / 2;
-                }
-                // Top edge (remember Y is inverted in UI - popup grows downward)
-                if (posY > parentHeight / 2)
-                {
-                    posY = parentHeight / 2;
-                }
-                // Bottom edge
-                if (posY - popupHeight < -parentHeight / 2)
-                {
-                    posY = -parentHeight / 2 + popupHeight;
-                }
-
-                // Ensure mouse is still inside popup (adjust if clamping moved it too far)
-                // Keep at least 20px margin from edges where possible
-                float minX = posX + 20f;
-                float maxX = posX + popupWidth - 20f;
-                float minY = posY - popupHeight + 20f;
-                float maxY = posY - 20f;
-
-                // If anchor is outside the popup after clamping, adjust
-                // Skip for equipment nav — popup is intentionally placed away from anchor
-                if (!equipmentNavMode && (localPos.x < minX || localPos.x > maxX || localPos.y < minY || localPos.y > maxY))
-                {
-                    // Try to keep mouse inside by shifting popup
-                    if (localPos.x < minX) posX = localPos.x - 20f;
-                    if (localPos.x > maxX) posX = localPos.x - popupWidth + 20f;
-                }
-            }
+            var (posX, posY) = calculator.CalculatePosition(
+                localPos.x,
+                localPos.y,
+                popupRect.sizeDelta.x,
+                popupRect.sizeDelta.y,
+                usingController
+            );
 
             popupRect.anchoredPosition = new UnityEngine.Vector2(posX, posY);
         }
@@ -5770,7 +5705,43 @@ namespace VSItemTooltips
 
         #region Data Access Helpers
 
-        private static WeaponData GetWeaponData(WeaponType type)
+        /// <summary>
+        /// Gets owned weapon types from the current game session.
+        /// </summary>
+        public static List<WeaponType> GetOwnedWeaponTypes()
+        {
+            var owned = new List<WeaponType>();
+            try
+            {
+                foreach (WeaponType wt in Enum.GetValues(typeof(WeaponType)))
+                {
+                    if (PlayerOwnsWeapon(wt))
+                        owned.Add(wt);
+                }
+            }
+            catch { }
+            return owned;
+        }
+
+        /// <summary>
+        /// Gets owned item types from the current game session.
+        /// </summary>
+        public static List<ItemType> GetOwnedItemTypes()
+        {
+            var owned = new List<ItemType>();
+            try
+            {
+                foreach (ItemType it in Enum.GetValues(typeof(ItemType)))
+                {
+                    if (PlayerOwnsItem(it))
+                        owned.Add(it);
+                }
+            }
+            catch { }
+            return owned;
+        }
+
+        public static WeaponData GetWeaponData(WeaponType type)
         {
             if (cachedWeaponsDict == null) return null;
 
@@ -5797,7 +5768,7 @@ namespace VSItemTooltips
             return null;
         }
 
-        private static object GetPowerUpData(ItemType type)
+        public static object GetPowerUpData(ItemType type)
         {
             if (cachedPowerUpsDict == null) return null;
 
@@ -6031,7 +6002,7 @@ namespace VSItemTooltips
             return null;
         }
 
-        private static T GetPropertyValue<T>(object obj, string propertyName)
+        public static T GetPropertyValue<T>(object obj, string propertyName)
         {
             if (obj == null) return default;
 
@@ -6050,7 +6021,7 @@ namespace VSItemTooltips
             return default;
         }
 
-        private static string GetLocalizedWeaponDescription(WeaponData data, WeaponType type)
+        public static string GetLocalizedWeaponDescription(WeaponData data, WeaponType type)
         {
             if (data == null) return "";
 
@@ -6077,7 +6048,7 @@ namespace VSItemTooltips
             return "";
         }
 
-        private static string GetLocalizedWeaponName(WeaponData data, WeaponType type)
+        public static string GetLocalizedWeaponName(WeaponData data, WeaponType type)
         {
             if (data == null) return type.ToString();
             try
@@ -6097,7 +6068,7 @@ namespace VSItemTooltips
             return data.name ?? type.ToString();
         }
 
-        private static string GetLocalizedPowerUpDescription(object data, ItemType type)
+        public static string GetLocalizedPowerUpDescription(object data, ItemType type)
         {
             if (data == null) return "";
             try
@@ -6118,7 +6089,7 @@ namespace VSItemTooltips
             return GetPropertyValue<string>(data, "description") ?? "";
         }
 
-        private static string GetLocalizedPowerUpName(object data, ItemType type)
+        public static string GetLocalizedPowerUpName(object data, ItemType type)
         {
             if (data == null) return type.ToString();
             try

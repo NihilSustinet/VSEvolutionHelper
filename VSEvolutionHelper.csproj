@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <None Include=".github\workflows\test.yml" />
+    <None Include="CI.sln" />
     <None Include="Tests\VSEvolutionHelper.Tests.csproj" />
     <None Include="VSEvolutionHelper.Core\VSEvolutionHelper.Core.csproj" />
   </ItemGroup>
