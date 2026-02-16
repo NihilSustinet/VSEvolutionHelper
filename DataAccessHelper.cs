@@ -50,7 +50,10 @@ namespace VSItemTooltips
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error accessing weapon data for '{type}': {ex.Message}");
+            }
 
             return null;
         }
@@ -69,7 +72,10 @@ namespace VSItemTooltips
                     return indexer.GetValue(GameDataCache.WeaponsDict, new object[] { type }) as Il2CppSystem.Collections.Generic.List<WeaponData>;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error accessing weapon data list for '{type}': {ex.Message}");
+            }
             return null;
         }
 
@@ -104,7 +110,10 @@ namespace VSItemTooltips
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error accessing powerup data for '{type}': {ex.Message}");
+            }
 
             return null;
         }
@@ -228,7 +237,10 @@ namespace VSItemTooltips
                     return result;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error loading sprite from atlas '{atlasName}/{frameName}': {ex.Message}");
+            }
             return null;
         }
 
@@ -419,7 +431,10 @@ namespace VSItemTooltips
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error getting localized weapon name for '{type}': {ex.Message}");
+            }
             return data.name ?? type.ToString();
         }
 
@@ -443,7 +458,10 @@ namespace VSItemTooltips
                     if (!string.IsNullOrEmpty(result)) return result;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error getting localized powerup description for '{type}': {ex.Message}");
+            }
             return GetPropertyValue<string>(data, "description") ?? "";
         }
 
@@ -464,7 +482,10 @@ namespace VSItemTooltips
                     if (!string.IsNullOrEmpty(result)) return result;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error getting localized powerup name for '{type}': {ex.Message}");
+            }
             return GetPropertyValue<string>(data, "name") ?? type.ToString();
         }
 

@@ -141,7 +141,10 @@ namespace VSItemTooltips
                         }
                         if (gameManagerType != null) break;
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        MelonLogger.Warning($"Error scanning assembly for GameManager type: {ex.Message}");
+                    }
                 }
 
                 if (gameManagerType != null)
@@ -163,7 +166,10 @@ namespace VSItemTooltips
                                 if (instance != null) break;
                             }
                         }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            MelonLogger.Warning($"Error accessing static member '{member.Name}' on GameManager: {ex.Message}");
+                        }
                     }
 
                     if (instance != null)
@@ -182,7 +188,10 @@ namespace VSItemTooltips
                                         return;
                                     }
                                 }
-                                catch { }
+                                catch (Exception ex)
+                                {
+                                    MelonLogger.Warning($"Error accessing property '{prop.Name}' on GameManager instance: {ex.Message}");
+                                }
                             }
                         }
                     }
@@ -289,7 +298,10 @@ namespace VSItemTooltips
                             break;
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        MelonLogger.Warning($"Error scanning assembly for GameSessionData: {ex.Message}");
+                    }
                 }
 
                 // Method 0.5: Try to find "Game" GameObject and get GameManager component
@@ -320,7 +332,10 @@ namespace VSItemTooltips
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning($"Error finding GameManager from Game GameObject: {ex.Message}");
+                }
 
                 // Additional methods omitted for brevity - can be added if needed
             }
@@ -375,7 +390,10 @@ namespace VSItemTooltips
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning($"Error accessing session property/field '{name}' on component: {ex.Message}");
+                }
             }
 
             return false;
@@ -605,7 +623,10 @@ namespace VSItemTooltips
                         cachedAllArcanas = allArcanasProp.GetValue(cachedDataManager);
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning($"Error accessing AllArcanas property on DataManager: {ex.Message}");
+                }
             }
 
             return cachedAllArcanas;
@@ -648,7 +669,10 @@ namespace VSItemTooltips
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"Error caching LevelUpFactory from GameManager: {ex.Message}");
+            }
 
             return cachedLevelUpFactory;
         }
