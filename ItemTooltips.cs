@@ -90,6 +90,23 @@ namespace VSItemTooltips
         private static readonly float Padding = 12f;
         private static readonly float Spacing = 8f;
 
+        /// <summary>
+        /// Safely gets types from an assembly, handling IL2CPP assemblies that may have types that fail to load.
+        /// Returns only the types that loaded successfully, ignoring load failures.
+        /// </summary>
+        private static Type[] GetTypesSafe(Assembly assembly)
+        {
+            try
+            {
+                return assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                // Some types failed to load, but we can still use the ones that succeeded
+                return ex.Types.Where(t => t != null).ToArray();
+            }
+        }
+
         public override void OnInitializeMelon()
         {
             harmonyInstance = new HarmonyLib.Harmony("com.nihil.vsitemtooltips");
@@ -141,7 +158,7 @@ namespace VSItemTooltips
                 {
                     try
                     {
-                        var itemUIType = assembly.GetTypes()
+                        var itemUIType = GetTypesSafe(assembly)
                             .FirstOrDefault(t => t.Name == "LevelUpItemUI");
 
                         if (itemUIType != null)
@@ -193,7 +210,7 @@ namespace VSItemTooltips
                 try
                 {
                     var gameAssembly = typeof(WeaponData).Assembly;
-                    arcanaTypeEnum = gameAssembly.GetTypes().FirstOrDefault(t => t.Name == "ArcanaType");
+                    arcanaTypeEnum = GetTypesSafe(gameAssembly).FirstOrDefault(t => t.Name == "ArcanaType");
                     if (arcanaTypeEnum != null)
                     {
                         GameDataCache.SetArcanaTypeEnum(arcanaTypeEnum);
@@ -211,7 +228,7 @@ namespace VSItemTooltips
 
                     try
                     {
-                        var iconTypes = assembly.GetTypes()
+                        var iconTypes = GetTypesSafe(assembly)
                             .Where(t => t.Name.ToLower().Contains("icon") ||
                                        t.Name.ToLower().Contains("equipment") ||
                                        t.Name.ToLower().Contains("itemui") ||
@@ -319,7 +336,7 @@ namespace VSItemTooltips
                 {
                     try
                     {
-                        var merchantType = assembly.GetTypes()
+                        var merchantType = GetTypesSafe(assembly)
                             .FirstOrDefault(t => t.Name.Contains("Merchant") && t.Name.Contains("Page"));
 
                         if (merchantType != null)
@@ -379,7 +396,7 @@ namespace VSItemTooltips
                     {
                         try
                         {
-                            foreach (var t in assembly.GetTypes())
+                            foreach (var t in GetTypesSafe(assembly))
                             {
                                 if (t.Name == "DataManager" && t.Namespace != null && t.Namespace.Contains("VampireSurvivors"))
                                 {
@@ -397,16 +414,19 @@ namespace VSItemTooltips
 
                     if (dataManagerType != null)
                     {
-
-                        var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new System.Type[0]);
-                        if (findMethod != null)
+                        // Check if type inherits from UnityEngine.Object (required for FindObjectOfType)
+                        if (typeof(UnityEngine.Object).IsAssignableFrom(dataManagerType))
                         {
-                            var genericMethod = findMethod.MakeGenericMethod(dataManagerType);
-                            var dm = genericMethod.Invoke(null, null);
-                            if (dm != null)
+                            var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new System.Type[0]);
+                            if (findMethod != null)
                             {
-                                CacheDataManager(dm);
-                                return;
+                                var genericMethod = findMethod.MakeGenericMethod(dataManagerType);
+                                var dm = genericMethod.Invoke(null, null);
+                                if (dm != null)
+                                {
+                                    CacheDataManager(dm);
+                                    return;
+                                }
                             }
                         }
                     }
@@ -422,7 +442,7 @@ namespace VSItemTooltips
                 {
                     try
                     {
-                        foreach (var t in assembly.GetTypes())
+                        foreach (var t in GetTypesSafe(assembly))
                         {
                             if (t.Name == "GameManager")
                             {
@@ -1076,7 +1096,7 @@ namespace VSItemTooltips
                     if (!assembly.FullName.Contains("Il2Cpp")) continue;
                     try
                     {
-                        var wsiType = assembly.GetTypes().FirstOrDefault(t => t.Name == "WeaponSelectionItemUI");
+                        var wsiType = GetTypesSafe(assembly).FirstOrDefault(t => t.Name == "WeaponSelectionItemUI");
                         if (wsiType != null)
                         {
                             cachedWeaponSelectionItemType = wsiType;
@@ -1532,27 +1552,31 @@ namespace VSItemTooltips
 
                     try
                     {
-                        var gameSessionType = assembly.GetTypes()
+                        var gameSessionType = GetTypesSafe(assembly)
                             .FirstOrDefault(t => t.Name == "GameSessionData");
 
                         if (gameSessionType != null)
                         {
-                            // Use reflection to call UnityEngine.Object.FindObjectOfType<GameSessionData>()
-                            var findMethod = typeof(UnityEngine.Object).GetMethods()
-                                .FirstOrDefault(m => m.Name == "FindObjectOfType" && m.IsGenericMethod && m.GetParameters().Length == 0);
-
-                            if (findMethod != null)
+                            // Check if type inherits from UnityEngine.Object (required for FindObjectOfType)
+                            if (typeof(UnityEngine.Object).IsAssignableFrom(gameSessionType))
                             {
-                                var genericMethod = findMethod.MakeGenericMethod(gameSessionType);
-                                var session = genericMethod.Invoke(null, null);
+                                // Use reflection to call UnityEngine.Object.FindObjectOfType<GameSessionData>()
+                                var findMethod = typeof(UnityEngine.Object).GetMethods()
+                                    .FirstOrDefault(m => m.Name == "FindObjectOfType" && m.IsGenericMethod && m.GetParameters().Length == 0);
 
-                                if (session != null)
+                                if (findMethod != null)
                                 {
-                                    var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
-                                    if (charProp != null)
+                                    var genericMethod = findMethod.MakeGenericMethod(gameSessionType);
+                                    var session = genericMethod.Invoke(null, null);
+
+                                    if (session != null)
                                     {
-                                        GameDataCache.CacheGameSession(session);
-                                        return;
+                                        var charProp = session.GetType().GetProperty("ActiveCharacter", BindingFlags.Public | BindingFlags.Instance);
+                                        if (charProp != null)
+                                        {
+                                            GameDataCache.CacheGameSession(session);
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -1613,7 +1637,7 @@ namespace VSItemTooltips
                     try
                     {
                         // Look for types that might be game sessions
-                        var sessionTypes = assembly.GetTypes()
+                        var sessionTypes = GetTypesSafe(assembly)
                             .Where(t => t.Name.Contains("GameSession") || t.Name == "GameManager")
                             .Take(5);
 
@@ -1889,7 +1913,7 @@ namespace VSItemTooltips
                 {
                     try
                     {
-                        foreach (var t in assembly.GetTypes())
+                        foreach (var t in GetTypesSafe(assembly))
                         {
                             if (t.Name == "GameManager")
                             {
