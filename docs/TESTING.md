@@ -1,53 +1,52 @@
-# Testing Guide
+# Testing
 
 ## Overview
 
-This project uses **Hexagonal Architecture** (Ports & Adapters) to make the business logic testable despite heavy dependencies on Unity and IL2CPP.
+Tests are implemented using a **hexagonal architecture** (ports and adapters) to make the business logic testable despite heavy dependencies on Unity and IL2CPP. 
 
 ## Architecture
-
 ```
 ┌─────────────────────────────────────────────────┐
-│         ItemTooltipsMod (MelonMod)             │
-│         Unity/IL2CPP Dependent Layer           │
+│         ItemTooltipsMod (MelonMod)              │
+│         Unity/IL2CPP Dependent Layer            │
 └────────────────┬────────────────────────────────┘
                  │
                  │ implements interfaces
                  ▼
 ┌─────────────────────────────────────────────────┐
 │         Abstractions (Interfaces)               │
-│  IGameDataProvider, IPlayerStateProvider, etc. │
+│  IGameDataProvider, IPlayerStateProvider, etc.  │
 └────────────────┬────────────────────────────────┘
                  │
                  │ injected into
                  ▼
 ┌─────────────────────────────────────────────────┐
-│      Services (Testable Business Logic)        │
-│    EvolutionCalculator, PopupPositioner, etc.  │
+│      Services (Testable Business Logic)         │
+│    EvolutionCalculator, PopupPositioner, etc.   │
 └─────────────────────────────────────────────────┘
 ```
 
 ## What CAN Be Tested
 
-✅ **Business Logic**:
+**Business Logic**:
 - Evolution formula calculations
 - Popup positioning algorithms
 - Icon grid layout
 - State transitions (controller modes, navigation)
 
-✅ **Data Processing**:
+**Data Processing**:
 - Sprite name lookups
 - Type mappings
 - Ownership/ban checking logic
 
-✅ **Pure Functions**:
+**Pure Functions**:
 - Position clamping
 - Grid calculations
 - String processing
 
 ## What CANNOT Be Tested Easily
 
-❌ **Unity/IL2CPP Specifics**:
+**Unity/IL2CPP Specifics**:
 - Harmony patches (runtime IL modification)
 - Actual GameObject creation
 - IL2CPP pointer manipulation
@@ -74,7 +73,7 @@ dotnet watch test
 ## Running Tests in GitHub Actions
 
 Tests run automatically on:
-- Push to `main` or `cleanup` branches
+- Push to branches
 - Pull requests
 
 See `.github/workflows/test.yml` for configuration.
@@ -129,20 +128,20 @@ public void GetWeaponEvolutions_ReturnsFormula_WhenWeaponEvolves()
 
 ## Future Improvements
 
-- [ ] Extract more business logic into testable services
-- [ ] Create DTOs to avoid IL2CPP types in tests
-- [ ] Add integration tests (run mod in headless Unity)
-- [ ] Add snapshot testing for popup layouts
-- [ ] Mock reflection operations for better coverage
+- Extract more business logic into testable services
+- Create DTOs to avoid IL2CPP types in tests
+- Add integration tests (run mod in headless Unity)
+- Add snapshot testing for popup layouts
+- Mock reflection operations for better coverage
 
 ## Refactoring for Testability Checklist
 
 When adding new features, ask:
 
-1. ✅ Can this logic run without Unity/IL2CPP?
-2. ✅ Can I inject dependencies instead of using statics?
-3. ✅ Can I separate "what to do" from "how to do it"?
-4. ✅ Can I test this with plain .NET types?
+1. Can this logic run without Unity/IL2CPP?
+2. Can I inject dependencies instead of using statics?
+3. Can I separate "what to do" from "how to do it"?
+4. Can I test this with plain .NET types?
 
 If yes to all → Put it in a **Service** class  
 If no → Keep it in the **Adapter** layer (mod/patches)
