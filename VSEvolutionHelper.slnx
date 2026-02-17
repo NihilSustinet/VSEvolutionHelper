@@ -1,3 +1,5 @@
 <Solution>
+  <Project Path="Tests/VSEvolutionHelper.Tests.csproj" />
+  <Project Path="VSEvolutionHelper.Core/VSEvolutionHelper.Core.csproj" />
   <Project Path="VSEvolutionHelper.csproj" />
 </Solution>
