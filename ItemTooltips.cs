@@ -1,16 +1,17 @@
-using MelonLoader;
+using BepInEx;
+using BepInEx.Unity.IL2CPP;
+using BepInEx.Logging;
+using Il2CppInterop.Runtime.Injection;
 using HarmonyLib;
 using System;
 using System.Reflection;
 using System.Collections.Generic;
 using System.Linq;
-using Il2CppVampireSurvivors.Data;
-using Il2CppVampireSurvivors.Data.Weapons;
-using Il2CppVampireSurvivors.Objects;
-using Il2CppVampireSurvivors.UI;
+using VampireSurvivors.Data;
+using VampireSurvivors.Data.Weapons;
+using VampireSurvivors.Objects;
+using VampireSurvivors.UI;
 
-[assembly: MelonInfo(typeof(VSItemTooltips.ItemTooltipsMod), "VS Item Tooltips", "1.2.0", "NihilXD")]
-[assembly: MelonGame("poncle", "Vampire Survivors")]
 
 namespace VSItemTooltips
 {
@@ -19,12 +20,15 @@ namespace VSItemTooltips
     /// Instead of patching specific UI windows, this hooks into any Image component
     /// that displays a weapon/item sprite and makes it hoverable.
     /// </summary>
-    public class ItemTooltipsMod : MelonMod
+    [BepInPlugin("com.NihilXD.VSItemTooltips", "VS Item Tooltips", "1.2.0")]
+    public class ItemTooltipsMod : BasePlugin
     {
         private static HarmonyLib.Harmony harmonyInstance;
+        public static ManualLogSource ModLogger;
 
         // State tracking
         private static bool wasGamePaused = false;
+        private static float _hideCheckTime = 0f;
 
         // Popup stack for recursive popups
         private static List<UnityEngine.GameObject> popupStack = new List<UnityEngine.GameObject>();
@@ -109,11 +113,16 @@ namespace VSItemTooltips
         private static readonly float Padding = 12f;
         private static readonly float Spacing = 8f;
 
-        public override void OnInitializeMelon()
+        public override void Load()
         {
+            ModLogger = Log;
             harmonyInstance = new HarmonyLib.Harmony("com.nihil.vsitemtooltips");
+            
+            ClassInjector.RegisterTypeInIl2Cpp<ItemTooltipsModBehaviour>();
+            AddComponent<ItemTooltipsModBehaviour>();
+            
             ApplyPatches();
-            MelonLogger.Msg("VS Item Tooltips initialized!");
+            ItemTooltipsMod.ModLogger.LogInfo("VS Item Tooltips initialized!");
         }
 
         private void ApplyPatches()
@@ -131,7 +140,7 @@ namespace VSItemTooltips
                 }
                 else
                 {
-                    MelonLogger.Warning("LevelUpPage.OnShowStart method not found!");
+                    ItemTooltipsMod.ModLogger.LogWarning("LevelUpPage.OnShowStart method not found!");
                 }
 
                 // Try to find and patch MerchantPage (name may vary)
@@ -143,11 +152,11 @@ namespace VSItemTooltips
                 // Patch EquipmentIconPause for pause screen icons
                 TryPatchEquipmentIconPause();
 
-                MelonLogger.Msg("Patches applied successfully");
+                ItemTooltipsMod.ModLogger.LogInfo("Patches applied successfully");
             }
             catch (Exception ex)
             {
-                MelonLogger.Error($"Failed to apply patches: {ex}");
+                ItemTooltipsMod.ModLogger.LogError($"Failed to apply patches: {ex}");
             }
         }
 
@@ -173,7 +182,7 @@ namespace VSItemTooltips
                             }
                             else
                             {
-                                MelonLogger.Warning("SetWeaponData method not found on LevelUpItemUI");
+                                ItemTooltipsMod.ModLogger.LogWarning("SetWeaponData method not found on LevelUpItemUI");
                             }
 
                             var setItemMethod = itemUIType.GetMethod("SetItemData", BindingFlags.Public | BindingFlags.Instance);
@@ -184,7 +193,7 @@ namespace VSItemTooltips
                             }
                             else
                             {
-                                MelonLogger.Warning("SetItemData method not found on LevelUpItemUI");
+                                ItemTooltipsMod.ModLogger.LogWarning("SetItemData method not found on LevelUpItemUI");
                             }
 
                             return;
@@ -192,11 +201,11 @@ namespace VSItemTooltips
                     }
                     catch { }
                 }
-                MelonLogger.Warning("LevelUpItemUI type not found in any assembly");
+                ItemTooltipsMod.ModLogger.LogWarning("LevelUpItemUI type not found in any assembly");
             }
             catch (Exception ex)
             {
-                MelonLogger.Error($"Error patching LevelUpItemUI: {ex}");
+                ItemTooltipsMod.ModLogger.LogError($"Error patching LevelUpItemUI: {ex}");
             }
         }
 
@@ -220,7 +229,7 @@ namespace VSItemTooltips
                 // Search ALL types that might be icon/equipment related
                 foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    if (!assembly.FullName.Contains("Il2Cpp")) continue;
+                    if (!assembly.FullName.Contains("VampireSurvivors")) continue;
 
                     try
                     {
@@ -305,7 +314,7 @@ namespace VSItemTooltips
                                     }
                                     catch (Exception patchEx)
                                     {
-                                        MelonLogger.Warning($"  Failed to patch: {patchEx.Message}");
+                                        ItemTooltipsMod.ModLogger.LogWarning($"  Failed to patch: {patchEx.Message}");
                                     }
                                 }
                             }
@@ -316,7 +325,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error searching for icon types: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error searching for icon types: {ex.Message}");
             }
         }
 
@@ -348,7 +357,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Could not patch MerchantPage: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Could not patch MerchantPage: {ex.Message}");
             }
         }
 
@@ -356,7 +365,7 @@ namespace VSItemTooltips
         private static bool escWasPressed = false;
         private static bool triedEarlyCaching = false;
 
-        public override void OnSceneWasLoaded(int buildIndex, string sceneName)
+        public static void OnSceneWasLoaded(int buildIndex, string sceneName)
         {
             // Reset caching state when a new scene loads
             triedEarlyCaching = false;
@@ -372,122 +381,49 @@ namespace VSItemTooltips
             arcanaWeaponDebugLogged.Clear();
         }
 
-        private void TryEarlyCaching()
+        private static void TryEarlyCaching()
         {
             if (triedEarlyCaching) return;
             if (cachedDataManager != null && cachedWeaponsDict != null) return;
-
             triedEarlyCaching = true;
-
-            try
-            {
-                // Method 1: Try FindObjectOfType for DataManager directly
-                try
-                {
-                    var dataManagerType = System.AppDomain.CurrentDomain.GetAssemblies()
-                        .SelectMany(a => { try { return a.GetTypes(); } catch { return new System.Type[0]; } })
-                        .FirstOrDefault(t => t.Name == "DataManager" && t.Namespace != null && t.Namespace.Contains("VampireSurvivors"));
-
-                    if (dataManagerType != null)
-                    {
-
-                        var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new System.Type[0]);
-                        if (findMethod != null)
-                        {
-                            var genericMethod = findMethod.MakeGenericMethod(dataManagerType);
-                            var dm = genericMethod.Invoke(null, null);
-                            if (dm != null)
-                            {
-                                CacheDataManager(dm);
-                                return;
-                            }
-                        }
-                    }
+            try {
+                var gm = UnityEngine.Object.FindObjectOfType<VampireSurvivors.Framework.GameManager>();
+                if (gm != null && gm.DataManager != null) {
+                    CacheDataManager(gm.DataManager);
                 }
-                catch { }
-
-                // Method 2: Try GameManager.Instance.Data
-                var gameManagerType = System.AppDomain.CurrentDomain.GetAssemblies()
-                    .SelectMany(a => { try { return a.GetTypes(); } catch { return new System.Type[0]; } })
-                    .FirstOrDefault(t => t.Name == "GameManager");
-
-                if (gameManagerType != null)
-                {
-                    // Try all static properties and fields to find instance
-                    var allStaticMembers = gameManagerType.GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-
-                    object instance = null;
-                    foreach (var member in allStaticMembers)
-                    {
-                        try
-                        {
-                            if (member is PropertyInfo prop && prop.PropertyType == gameManagerType)
-                            {
-                                instance = prop.GetValue(null);
-                                if (instance != null)
-                                {
-                                    break;
-                                }
-                            }
-                            else if (member is FieldInfo field && field.FieldType == gameManagerType)
-                            {
-                                instance = field.GetValue(null);
-                                if (instance != null)
-                                {
-                                    break;
-                                }
-                            }
-                        }
-                        catch { }
-                    }
-
-                    if (instance != null)
-                    {
-                        // Try to get Data property
-                        var allProps = instance.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        foreach (var prop in allProps)
-                        {
-                            if (prop.Name == "Data" || prop.PropertyType.Name.Contains("DataManager"))
-                            {
-                                try
-                                {
-                                    var val = prop.GetValue(instance);
-                                    if (val != null)
-                                    {
-                                        CacheDataManager(val);
-                                        return;
-                                    }
-                                }
-                                catch { }
-                            }
-                        }
-                    }
-                }
-
-                // Method 3: Search all MonoBehaviours for one with GetConvertedWeapons method
-                var allBehaviours = UnityEngine.Object.FindObjectsOfType<UnityEngine.MonoBehaviour>();
-                foreach (var mb in allBehaviours.Take(100))
-                {
-                    var getWeaponsMethod = mb.GetType().GetMethod("GetConvertedWeapons");
-                    if (getWeaponsMethod != null)
-                    {
-                        CacheDataManager(mb);
-                        return;
-                    }
-                }
-
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Warning($"Early caching failed: {ex.Message}");
-            }
+            } catch (Exception ex) { ItemTooltipsMod.ModLogger.LogWarning($"Early caching failed: {ex}"); }
         }
 
-        public override void OnUpdate()
+        public static void OnUpdate()
         {
+            if (_hideCheckTime > 0 && UnityEngine.Time.time >= _hideCheckTime)
+            {
+                _hideCheckTime = 0f;
+                if (mouseOverPopupIndex == -1 && !equipmentNavMode)
+                {
+                    HideAllPopups();
+                }
+            }
+
             // Try to cache data early (once per scene)
             if (!triedEarlyCaching && cachedDataManager == null)
             {
+                ItemTooltipsMod.ModLogger.LogInfo("Weapons count: " + (spriteToWeaponType != null ? spriteToWeaponType.Count : 0));
+                if (spriteToWeaponType != null) {
+                    bool hasPassives = false;
+                    foreach(var k in spriteToWeaponType.Keys) {
+                        if (k.ToLower().Contains("spinach") || k.ToLower().Contains("tome")) hasPassives = true;
+                    }
+                    if (hasPassives) ItemTooltipsMod.ModLogger.LogInfo("PASSIVES ARE IN WEAPONS!");
+                }
+                
+                var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
+                if (safeArea != null) {
+                    ItemTooltipsMod.ModLogger.LogInfo("SAFE AREA CHILDREN:");
+                    for (int i=0; i<safeArea.transform.childCount; i++) {
+                        ItemTooltipsMod.ModLogger.LogInfo(safeArea.transform.GetChild(i).name);
+                    }
+                }
                 TryEarlyCaching();
             }
 
@@ -565,7 +501,7 @@ namespace VSItemTooltips
             }
 
             // Reset view caches if we've returned to main menu (views destroyed)
-            if (!isGamePaused && levelUpView == null && merchantView == null && pauseView == null && itemFoundView == null)
+            if (!isGamePaused && levelUpView == null && merchantView == null && pauseView == null && itemFoundView == null && treasureView == null)
             {
                 if (inGameUIFound)
                 {
@@ -625,7 +561,31 @@ namespace VSItemTooltips
             }
 
             // Only process when game is paused
-            if (!isGamePaused) return;
+            if (!isGamePaused) {
+                float timeNow_debug2 = UnityEngine.Time.unscaledTime;
+                if (UnityEngine.Time.timeScale == 0f && timeNow_debug2 - lastScanTime >= 1f) {
+                    lastScanTime = timeNow_debug2;
+                    var safeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area");
+                    if (safeArea != null) {
+                        for (int i = 0; i < safeArea.transform.childCount; i++) {
+                            var child = safeArea.transform.GetChild(i);
+                            if (child.gameObject.activeInHierarchy && !child.name.Contains("Joystick")) {
+                                ItemTooltipsMod.ModLogger.LogInfo("[NOT PAUSED BUT TIMESCALE 0] Active Safe Area View: " + child.name);
+                            }
+                        }
+                    }
+                    var gameUI = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI");
+                    if (gameUI != null) {
+                        for (int i = 0; i < gameUI.transform.childCount; i++) {
+                            var child = gameUI.transform.GetChild(i);
+                            if (child.gameObject.activeInHierarchy && child.name != "Safe Area") {
+                                ItemTooltipsMod.ModLogger.LogInfo("[NOT PAUSED BUT TIMESCALE 0] Active Game UI View: " + child.name);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
 
             // Controller/keyboard dwell detection for paused screens (skip if in equipment nav mode)
             if (usingController && !equipmentNavMode)
@@ -647,6 +607,47 @@ namespace VSItemTooltips
                     ScanWeaponSelectionView(weaponSelectionView);
                 }
             }
+
+            // --- MANUALLY CHECK HOVER FOR TRACKED ICONS TO BYPASS INVISIBLE UI BLOCKERS ---
+            if (!usingController && trackedIcons != null && trackedIcons.Count > 0)
+            {
+                bool manualHoverActive = false;
+                var mousePos = UnityEngine.Input.mousePosition;
+                
+                foreach (var kvp in trackedIcons)
+                {
+                    var tracked = kvp.Value;
+                    if (tracked.Image == null || !tracked.Image.gameObject.activeInHierarchy) continue;
+
+                    var rect = tracked.Image.rectTransform;
+                    var canvas = tracked.Image.canvas;
+                    if (canvas == null) continue;
+
+                    UnityEngine.Camera cam = null;
+                    if (canvas.renderMode == UnityEngine.RenderMode.ScreenSpaceCamera || canvas.renderMode == UnityEngine.RenderMode.WorldSpace)
+                        cam = canvas.worldCamera;
+
+                    if (UnityEngine.RectTransformUtility.RectangleContainsScreenPoint(rect, mousePos, cam))
+                    {
+                        manualHoverActive = true;
+                        
+                        // Cancel any pending hide
+                        _hideCheckTime = 0f;
+                        
+                        if (mouseOverPopupIndex == -1) // No popup currently showing
+                        {
+                            ShowItemPopup(tracked.Image.transform, tracked.WeaponType, tracked.ItemType);
+                        }
+                        break;
+                    }
+                }
+
+                if (!manualHoverActive && mouseOverPopupIndex == -1 && popupStack.Count > 0 && _hideCheckTime == 0f)
+                {
+                    // If not manually hovering, not hovering a popup, and popup is open -> trigger hide
+                    _hideCheckTime = UnityEngine.Time.time + 0.1f;
+                }
+            }
         }
 
         #region Pause Detection
@@ -658,6 +659,8 @@ namespace VSItemTooltips
         private static UnityEngine.GameObject itemFoundView = null;
         private static UnityEngine.GameObject arcanaView = null;
         private static UnityEngine.GameObject weaponSelectionView = null;
+        private static UnityEngine.GameObject treasureView = null;
+        private static UnityEngine.GameObject gameplayPreloaderSafeArea = null;
 
         // Cached HUD elements (always visible, but only hoverable when paused)
         private static UnityEngine.GameObject hudInventory = null;
@@ -676,17 +679,20 @@ namespace VSItemTooltips
         {
             activeUIContainers.Clear();
 
-            // Find views if not cached
             if (levelUpView == null)
                 levelUpView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - Level Up");
             if (merchantView == null)
                 merchantView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - Merchant");
             if (itemFoundView == null)
-                itemFoundView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - ItemFound");
+                itemFoundView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - Item Found");
             if (arcanaView == null)
                 arcanaView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - ArcanaMainSelection");
             if (weaponSelectionView == null)
                 weaponSelectionView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/Safe Area/View - WeaponSelection");
+            if (treasureView == null)
+                treasureView = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/GameplayPreloader/Treasure");
+            if (gameplayPreloaderSafeArea == null)
+                gameplayPreloaderSafeArea = UnityEngine.GameObject.Find("GAME UI/Canvas - Game UI/GameplayPreloader/Safe Area");
 
             // Try multiple paths for pause view
             if (pauseView == null)
@@ -727,7 +733,7 @@ namespace VSItemTooltips
             }
 
             // Check if we're in a game by seeing if any view was found
-            bool anyViewFound = levelUpView != null || merchantView != null || pauseView != null || itemFoundView != null || weaponSelectionView != null;
+            bool anyViewFound = levelUpView != null || merchantView != null || pauseView != null || itemFoundView != null || weaponSelectionView != null || treasureView != null;
 
             // Only search for HUD once we've confirmed game UI exists (i.e., we're in a game)
             if (!hudSearched && anyViewFound && !inGameUIFound)
@@ -794,6 +800,16 @@ namespace VSItemTooltips
                 isPaused = true;
             }
 
+            if (treasureView != null) {
+                if (treasureView.activeInHierarchy) {
+                    activeUIContainers.Add(treasureView.transform);
+                    if (gameplayPreloaderSafeArea != null && gameplayPreloaderSafeArea.activeInHierarchy) {
+                        activeUIContainers.Add(gameplayPreloaderSafeArea.transform);
+                    }
+                    isPaused = true;
+                }
+            }
+
             // Also check time scale as fallback, but ONLY if we're in an actual game run
             // (prevents activating on main menu / Collection screen where timeScale may also be 0)
             if (!isPaused && inGameUIFound && UnityEngine.Time.timeScale == 0f)
@@ -829,7 +845,7 @@ namespace VSItemTooltips
                 }
                 else if (!wasGamePaused)
                 {
-                    MelonLogger.Warning("Safe Area not found!");
+                    ItemTooltipsMod.ModLogger.LogWarning("Safe Area not found!");
                 }
                 isPaused = true;
             }
@@ -867,6 +883,19 @@ namespace VSItemTooltips
 
         private static void ScanForIcons()
         {
+            // Debug dump active UI containers
+            if (cachedSafeArea != null)
+            {
+                for (int i = 0; i < cachedSafeArea.childCount; i++)
+                {
+                    var child = cachedSafeArea.GetChild(i);
+                    if (child.gameObject.activeInHierarchy && !child.name.Contains("Joystick"))
+                    {
+                        ItemTooltipsMod.ModLogger.LogInfo("Active View in Safe Area: " + child.name);
+                    }
+                }
+            }
+
             // Only scan if we have active UI containers
             if (activeUIContainers.Count == 0)
                 return;
@@ -877,7 +906,7 @@ namespace VSItemTooltips
                 BuildLookupTables();
                 if (!lookupTablesBuilt && !loggedScanStatus)
                 {
-                    MelonLogger.Warning("Lookup tables not built - no DataManager cached yet. Hovers won't work until level-up.");
+                    ItemTooltipsMod.ModLogger.LogWarning("Lookup tables not built - no DataManager cached yet. Hovers won't work until level-up.");
                     loggedScanStatus = true;
                 }
             }
@@ -893,7 +922,6 @@ namespace VSItemTooltips
                 // Get all Image components in this container's hierarchy
                 var images = container.GetComponentsInChildren<UnityEngine.UI.Image>(false); // false = only active
                 totalImages += images.Length;
-
                 foreach (var image in images)
                 {
                     if (image == null || image.sprite == null) continue;
@@ -931,6 +959,9 @@ namespace VSItemTooltips
                     // If we identified this as an item, add hover tracking
                     if (weaponType.HasValue || itemType.HasValue)
                     {
+                        // Force raycast target to true so purely decorative icons can receive hover events
+                        image.raycastTarget = true;
+
                         matchedImages++;
                         var tracked = new TrackedIcon
                         {
@@ -999,7 +1030,7 @@ namespace VSItemTooltips
             exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
             {
                 // Delay hide to allow moving to popup
-                MelonLoader.MelonCoroutines.Start(DelayedHideCheck());
+                _hideCheckTime = UnityEngine.Time.time + 0.1f;
             }));
             eventTrigger.triggers.Add(exitEntry);
         }
@@ -1042,7 +1073,7 @@ namespace VSItemTooltips
                 triedFindingWSIType = true;
                 foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    if (!assembly.FullName.Contains("Il2Cpp")) continue;
+                    if (!assembly.FullName.Contains("VampireSurvivors")) continue;
                     try
                     {
                         var wsiType = assembly.GetTypes().FirstOrDefault(t => t.Name == "WeaponSelectionItemUI");
@@ -1058,19 +1089,19 @@ namespace VSItemTooltips
 
             if (cachedWeaponSelectionItemType == null)
             {
-                MelonLogger.Warning("WeaponSelectionItemUI type not found in assemblies");
+                ItemTooltipsMod.ModLogger.LogWarning("WeaponSelectionItemUI type not found in assemblies");
                 return;
             }
 
             // Find Content container: Panel → ScrollViewWithSlider → Viewport → Content
             var panel = FindChildRecursive(viewGo.transform, "Panel");
-            if (panel == null) { MelonLogger.Warning("Panel not found in WeaponSelection"); return; }
+            if (panel == null) { ItemTooltipsMod.ModLogger.LogWarning("Panel not found in WeaponSelection"); return; }
 
             var scrollView = panel.Find("ScrollViewWithSlider");
-            if (scrollView == null) { MelonLogger.Warning("ScrollViewWithSlider not found"); return; }
+            if (scrollView == null) { ItemTooltipsMod.ModLogger.LogWarning("ScrollViewWithSlider not found"); return; }
 
             var viewport = scrollView.Find("Viewport");
-            if (viewport == null) { MelonLogger.Warning("Viewport not found"); return; }
+            if (viewport == null) { ItemTooltipsMod.ModLogger.LogWarning("Viewport not found"); return; }
 
             UnityEngine.Transform content = null;
             for (int i = 0; i < viewport.childCount; i++)
@@ -1078,7 +1109,7 @@ namespace VSItemTooltips
                 var child = viewport.GetChild(i);
                 if (child.name == "Content") { content = child; break; }
             }
-            if (content == null) { MelonLogger.Warning("Content not found"); return; }
+            if (content == null) { ItemTooltipsMod.ModLogger.LogWarning("Content not found"); return; }
 
             // Cache the get__type method (getter for _type property)
             var getTypeMethod = cachedWeaponSelectionItemType.GetMethod("get__type", BindingFlags.Public | BindingFlags.Instance);
@@ -1121,7 +1152,7 @@ namespace VSItemTooltips
                 }
                 catch (Exception ex)
                 {
-                    if (i == 0) MelonLogger.Warning($"Error reading WSI component: {ex.Message}");
+                    if (i == 0) ItemTooltipsMod.ModLogger.LogWarning($"Error reading WSI component: {ex.Message}");
                 }
 
                 if (weaponType.HasValue)
@@ -1134,7 +1165,7 @@ namespace VSItemTooltips
                 }
             }
 
-            MelonLogger.Msg($"WeaponSelection: set up hovers on {count}/{content.childCount} items");
+            ItemTooltipsMod.ModLogger.LogInfo($"WeaponSelection: set up hovers on {count}/{content.childCount} items");
         }
 
         /// <summary>
@@ -1368,60 +1399,7 @@ namespace VSItemTooltips
             return path;
         }
 
-        private static System.Collections.IEnumerator DelayedHideCheck()
-        {
-            // Capture current stack size
-            int stackSizeAtStart = popupStack.Count;
 
-            // Wait frames to give time to reach popup
-            for (int i = 0; i < 10; i++)
-            {
-                yield return null;
-            }
-
-            // Only hide all if:
-            // 1. Not hovering over any popup (mouseOverPopupIndex == -1)
-            // 2. Stack hasn't grown (no new popup opened)
-            if (mouseOverPopupIndex < 0 && popupStack.Count <= stackSizeAtStart && popupStack.Count > 0)
-            {
-                HideAllPopups();
-            }
-        }
-
-        private static System.Collections.IEnumerator DelayedStackHideCheck(int exitedPopupIndex)
-        {
-            // Capture current stack size
-            int stackSizeAtStart = popupStack.Count;
-
-            // Wait frames to allow moving to child/sibling elements
-            for (int i = 0; i < 10; i++)
-            {
-                yield return null;
-            }
-
-            // If stack grew (new child popup opened), don't hide anything
-            if (popupStack.Count > stackSizeAtStart)
-            {
-                yield break;
-            }
-
-            // If mouse is over this popup or a child, don't hide
-            if (mouseOverPopupIndex >= exitedPopupIndex)
-            {
-                yield break;
-            }
-
-            // Close everything ABOVE the currently hovered popup
-            // This handles the case where you jump from Child directly to Grandparent -
-            // both Child and Parent should close
-            int closeFromIndex = mouseOverPopupIndex + 1;
-            if (closeFromIndex < 0) closeFromIndex = 0; // If not over any popup, close all
-
-            while (popupStack.Count > closeFromIndex)
-            {
-                HideTopPopup();
-            }
-        }
 
         #endregion
 
@@ -1453,12 +1431,12 @@ namespace VSItemTooltips
                 if (lookupTablesBuilt && !loggedLookupTables)
                 {
                     loggedLookupTables = true;
-                    MelonLogger.Msg($"Built lookup tables: {spriteToWeaponType.Count} weapons, {spriteToItemType.Count} items");
+                    ItemTooltipsMod.ModLogger.LogInfo($"Built lookup tables: {spriteToWeaponType.Count} weapons, {spriteToItemType.Count} items");
                 }
             }
             catch (Exception ex)
             {
-                MelonLogger.Error($"Failed to build lookup tables: {ex}");
+                ItemTooltipsMod.ModLogger.LogError($"Failed to build lookup tables: {ex}");
             }
         }
 
@@ -1517,7 +1495,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error building weapon lookup: {ex}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error building weapon lookup: {ex}");
             }
         }
 
@@ -1528,7 +1506,11 @@ namespace VSItemTooltips
                 var dictType = powerUpsDict.GetType();
 
                 var keysProperty = dictType.GetProperty("Keys");
-                if (keysProperty == null) return;
+                if (keysProperty == null) 
+                {
+                    ItemTooltipsMod.ModLogger.LogWarning("Keys property is null! Type: " + dictType.FullName); 
+                    return; 
+                }
 
                 var keys = keysProperty.GetValue(powerUpsDict);
                 var enumerator = keys.GetType().GetMethod("GetEnumerator").Invoke(keys, null);
@@ -1540,7 +1522,22 @@ namespace VSItemTooltips
                 {
                     count++;
                     var key = current.GetValue(enumerator);
+                    
+                    ItemType? parsedIt = null;
                     if (key is ItemType it)
+                    {
+                        parsedIt = it;
+                    }
+                    else if (key != null)
+                    {
+                        try 
+                        {
+                            parsedIt = (ItemType)Enum.Parse(typeof(ItemType), key.ToString());
+                        }
+                        catch { }
+                    }
+
+                    if (parsedIt.HasValue)
                     {
                         var indexer = dictType.GetProperty("Item");
                         if (indexer != null)
@@ -1560,13 +1557,13 @@ namespace VSItemTooltips
                                     for (int i = 0; i < listCount; i++)
                                     {
                                         var data = listIndexer.GetValue(dataOrList, new object[] { i });
-                                        AddPowerUpToLookup(data, it);
+                                        AddPowerUpToLookup(data, parsedIt.Value);
                                     }
                                 }
                                 else
                                 {
                                     // Single item
-                                    AddPowerUpToLookup(dataOrList, it);
+                                    AddPowerUpToLookup(dataOrList, parsedIt.Value);
                                 }
                             }
                         }
@@ -1575,7 +1572,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error building powerup lookup: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error building powerup lookup: {ex.Message}");
             }
         }
 
@@ -1584,21 +1581,35 @@ namespace VSItemTooltips
             if (data == null) return;
 
             string frameName = null;
+            ItemTooltipsMod.ModLogger.LogInfo("AddPowerUp data type: " + data.GetType().FullName);
 
-            // Try property first
-            var frameNameProp = data.GetType().GetProperty("frameName", BindingFlags.Public | BindingFlags.Instance);
-            if (frameNameProp != null)
+            // Try casting to WeaponData directly (since in VS, both weapons and items use WeaponData)
+            if (data is WeaponData wd)
             {
-                frameName = frameNameProp.GetValue(data) as string;
+                ItemTooltipsMod.ModLogger.LogInfo("Cast to WeaponData successful!");
+                frameName = wd.frameName;
             }
-
-            // Try field if property didn't work
-            if (string.IsNullOrEmpty(frameName))
+            else
             {
-                var frameNameField = data.GetType().GetField("frameName", BindingFlags.Public | BindingFlags.Instance);
-                if (frameNameField != null)
+                ItemTooltipsMod.ModLogger.LogInfo("Cast to WeaponData FAILED!");
+                // Try property first, including inherited properties
+                var flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy;
+                var frameNameProp = data.GetType().GetProperty("frameName", flags);
+                if (frameNameProp != null)
                 {
-                    frameName = frameNameField.GetValue(data) as string;
+                    var val = frameNameProp.GetValue(data, null);
+                    if (val != null) frameName = val.ToString();
+                }
+
+                // Try field if property didn't work
+                if (string.IsNullOrEmpty(frameName))
+                {
+                    var frameNameField = data.GetType().GetField("frameName", flags);
+                    if (frameNameField != null)
+                    {
+                        var val = frameNameField.GetValue(data);
+                        if (val != null) frameName = val.ToString();
+                    }
                 }
             }
 
@@ -1630,11 +1641,11 @@ namespace VSItemTooltips
                         }
                     }
 
-                    MelonLogger.Warning("[CacheGameSession] Could not find Data on GameSession");
+                    ItemTooltipsMod.ModLogger.LogWarning("[CacheGameSession] Could not find Data on GameSession");
                 }
                 catch (Exception ex)
                 {
-                    MelonLogger.Warning($"Error caching DataManager from session: {ex.Message}");
+                    ItemTooltipsMod.ModLogger.LogWarning($"Error caching DataManager from session: {ex.Message}");
                 }
             }
         }
@@ -1650,7 +1661,7 @@ namespace VSItemTooltips
                 // Method 0: Try to find GameSessionData using Unity's FindObjectOfType
                 foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    if (!assembly.FullName.Contains("Il2Cpp")) continue;
+                    if (!assembly.FullName.Contains("VampireSurvivors")) continue;
 
                     try
                     {
@@ -1724,7 +1735,7 @@ namespace VSItemTooltips
                 // Method 1: Look for GameSessionData type with static Instance
                 foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    if (!assembly.FullName.Contains("Il2Cpp")) continue;
+                    if (!assembly.FullName.Contains("VampireSurvivors")) continue;
 
                     try
                     {
@@ -1806,7 +1817,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error finding game session: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error finding game session: {ex.Message}");
             }
         }
 
@@ -1912,7 +1923,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error setting up HUD hovers: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error setting up HUD hovers: {ex.Message}");
             }
         }
 
@@ -1971,7 +1982,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in SetupHUDSlots: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in SetupHUDSlots: {ex.Message}");
             }
         }
 
@@ -1980,81 +1991,16 @@ namespace VSItemTooltips
             return cachedDataManager != null;
         }
 
-        // Static version of data manager caching for use outside OnUpdate
+                        // Static version of data manager caching for use outside OnUpdate
         private static void TryCacheDataManagerStatic()
         {
             if (cachedDataManager != null) return;
-
-            try
-            {
-                // Try GameManager.Instance.Data
-                var gameManagerType = System.AppDomain.CurrentDomain.GetAssemblies()
-                    .SelectMany(a => { try { return a.GetTypes(); } catch { return new System.Type[0]; } })
-                    .FirstOrDefault(t => t.Name == "GameManager");
-
-                if (gameManagerType != null)
-                {
-                    object instance = null;
-                    var allStaticMembers = gameManagerType.GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                    foreach (var member in allStaticMembers)
-                    {
-                        try
-                        {
-                            if (member is PropertyInfo prop && prop.PropertyType == gameManagerType)
-                            {
-                                instance = prop.GetValue(null);
-                                if (instance != null) break;
-                            }
-                            else if (member is FieldInfo field && field.FieldType == gameManagerType)
-                            {
-                                instance = field.GetValue(null);
-                                if (instance != null) break;
-                            }
-                        }
-                        catch { }
-                    }
-
-                    if (instance != null)
-                    {
-                        var allProps = instance.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        foreach (var prop in allProps)
-                        {
-                            if (prop.Name == "Data" || prop.PropertyType.Name.Contains("DataManager"))
-                            {
-                                try
-                                {
-                                    var val = prop.GetValue(instance);
-                                    if (val != null)
-                                    {
-                                        CacheDataManager(val);
-                                        return;
-                                    }
-                                }
-                                catch { }
-                            }
-                        }
-                    }
+            try {
+                var gm = UnityEngine.Object.FindObjectOfType<VampireSurvivors.Framework.GameManager>();
+                if (gm != null && gm.DataManager != null) {
+                    CacheDataManager(gm.DataManager);
                 }
-
-                // Fallback: search MonoBehaviours
-                var allBehaviours = UnityEngine.Object.FindObjectsOfType<UnityEngine.MonoBehaviour>();
-                for (int i = 0; i < allBehaviours.Count && i < 200; i++)
-                {
-                    var mb = allBehaviours[i];
-                    if (mb == null) continue;
-                    var getWeaponsMethod = mb.GetType().GetMethod("GetConvertedWeapons");
-                    if (getWeaponsMethod != null)
-                    {
-                        CacheDataManager(mb);
-                        return;
-                    }
-                }
-
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Warning($"[Collection] Data caching failed: {ex.Message}");
-            }
+            } catch (Exception ex) { ItemTooltipsMod.ModLogger.LogWarning($"[Collection] Data caching failed: {ex}"); }
         }
 
         public static void CacheDataManager(object dataManager)
@@ -2086,7 +2032,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Error($"Error caching data manager: {ex}");
+                ItemTooltipsMod.ModLogger.LogError($"Error caching data manager: {ex}");
             }
         }
 
@@ -3206,7 +3152,11 @@ namespace VSItemTooltips
             {
                 if (popupAnchorIds[i] == anchorId)
                 {
-                    // Already showing this popup, don't recreate
+                    // Already showing this popup. Close any deeper popups (children)
+                    while (popupStack.Count > i + 1)
+                    {
+                        HideTopPopup();
+                    }
                     return;
                 }
             }
@@ -3328,17 +3278,17 @@ namespace VSItemTooltips
                 titleTextRect.offsetMin = new UnityEngine.Vector2(IconSize + Spacing, 0f);
                 titleTextRect.offsetMax = UnityEngine.Vector2.zero;
 
-                var titleTmp = titleText.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                var titleTmp = titleText.AddComponent<TMPro.TextMeshProUGUI>();
                 titleTmp.font = font;
                 titleTmp.text = itemName;
                 titleTmp.fontSize = 20f;
-                titleTmp.fontStyle = Il2CppTMPro.FontStyles.Bold;
+                titleTmp.fontStyle = TMPro.FontStyles.Bold;
                 titleTmp.color = UnityEngine.Color.white;
-                titleTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+                titleTmp.alignment = TMPro.TextAlignmentOptions.Left;
                 titleTmp.enableAutoSizing = true;
                 titleTmp.fontSizeMin = 12f;
                 titleTmp.fontSizeMax = 20f;
-                titleTmp.overflowMode = Il2CppTMPro.TextOverflowModes.Ellipsis;
+                titleTmp.overflowMode = TMPro.TextOverflowModes.Ellipsis;
 
                 // Add item icon to the left of the title
                 if (itemSprite != null)
@@ -3373,14 +3323,14 @@ namespace VSItemTooltips
                     float descWidth = maxWidth - Padding * 2;
                     descRect.sizeDelta = new UnityEngine.Vector2(descWidth, 0f);
 
-                    var descTmp = descObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                    var descTmp = descObj.AddComponent<TMPro.TextMeshProUGUI>();
                     descTmp.font = font;
                     descTmp.text = description;
                     descTmp.fontSize = 14f;
                     descTmp.color = new UnityEngine.Color(0.85f, 0.85f, 0.9f, 1f);
-                    descTmp.alignment = Il2CppTMPro.TextAlignmentOptions.TopLeft;
+                    descTmp.alignment = TMPro.TextAlignmentOptions.TopLeft;
                     descTmp.enableWordWrapping = true;
-                    descTmp.overflowMode = Il2CppTMPro.TextOverflowModes.Truncate;
+                    descTmp.overflowMode = TMPro.TextOverflowModes.Truncate;
                     descTmp.rectTransform.sizeDelta = new UnityEngine.Vector2(descWidth, 0f);
 
                     var descFitter = descObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
@@ -3615,7 +3565,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[PlayerOwnsWeapon] Error checking {weaponType}: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[PlayerOwnsWeapon] Error checking {weaponType}: {ex.Message}");
             }
 
             return false;
@@ -3982,7 +3932,7 @@ namespace VSItemTooltips
             return count;
         }
 
-        private static float AddWeaponEvolutionSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, WeaponType weaponType, float yOffset, float maxWidth)
+        private static float AddWeaponEvolutionSection(UnityEngine.Transform parent, TMPro.TMP_FontAsset font, WeaponType weaponType, float yOffset, float maxWidth)
         {
             var data = GetWeaponData(weaponType);
             if (data == null) return yOffset;
@@ -4048,7 +3998,7 @@ namespace VSItemTooltips
             // Add section header
             yOffset -= Spacing;
             var headerObj = CreateTextElement(parent, "EvoHeader", "Evolutions: (click for details)", font, 14f,
-                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
+                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), TMPro.FontStyles.Bold);
             var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
             headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
             headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
@@ -4071,7 +4021,7 @@ namespace VSItemTooltips
 
                 // Plus sign
                 var plusObj = CreateTextElement(parent, $"Plus{i}", "+", font, 18f,
-                    new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
+                    new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), TMPro.FontStyles.Bold);
                 var plusRect = plusObj.GetComponent<UnityEngine.RectTransform>();
                 plusRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                 plusRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
@@ -4093,15 +4043,15 @@ namespace VSItemTooltips
                 if (passive.RequiresMaxLevel)
                 {
                     var maxObj = CreateTextElement(parent, $"Max{i}", "MAX", font, 9f,
-                        new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                        new UnityEngine.Color(1f, 0.85f, 0f, 1f), TMPro.FontStyles.Bold);
                     var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
                     maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                     maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
                     maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
                     maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
                     maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
-                    var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
-                    if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                    var maxTmp = maxObj.GetComponent<TMPro.TextMeshProUGUI>();
+                    if (maxTmp != null) maxTmp.alignment = TMPro.TextAlignmentOptions.Center;
                 }
 
                 xOffset += iconSize + 4f;
@@ -4109,7 +4059,7 @@ namespace VSItemTooltips
 
             // Arrow
             var arrowObj = CreateTextElement(parent, "Arrow", "→", font, 18f,
-                new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Normal);
+                new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), TMPro.FontStyles.Normal);
             var arrowRect = arrowObj.GetComponent<UnityEngine.RectTransform>();
             arrowRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
             arrowRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
@@ -4133,7 +4083,7 @@ namespace VSItemTooltips
         /// For evolved weapons, shows what base weapon + passives created this evolution.
         /// Reverse-lookups: finds base weapons whose evoInto matches the current weapon type.
         /// </summary>
-        private static float AddEvolvedFromSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, WeaponType evolvedType, float yOffset, float maxWidth)
+        private static float AddEvolvedFromSection(UnityEngine.Transform parent, TMPro.TMP_FontAsset font, WeaponType evolvedType, float yOffset, float maxWidth)
         {
             if (cachedWeaponsDict == null) return yOffset;
 
@@ -4196,7 +4146,7 @@ namespace VSItemTooltips
             // Add section header
             yOffset -= Spacing;
             var headerObj = CreateTextElement(parent, "EvolvedFromHeader", "Evolved from: (click for details)", font, 14f,
-                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
+                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), TMPro.FontStyles.Bold);
             var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
             headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
             headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
@@ -4226,7 +4176,7 @@ namespace VSItemTooltips
 
                     // Plus sign
                     var plusObj = CreateTextElement(parent, $"EvolvedFromPlus{p}", "+", font, 14f,
-                        new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
+                        new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), TMPro.FontStyles.Bold);
                     var plusRect = plusObj.GetComponent<UnityEngine.RectTransform>();
                     plusRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                     plusRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
@@ -4248,15 +4198,15 @@ namespace VSItemTooltips
                     if (passive.RequiresMaxLevel)
                     {
                         var maxObj = CreateTextElement(parent, $"EvolvedFromMax{p}", "MAX", font, 9f,
-                            new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                            new UnityEngine.Color(1f, 0.85f, 0f, 1f), TMPro.FontStyles.Bold);
                         var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
                         maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                         maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
                         maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
                         maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
                         maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
-                        var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
-                        if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                        var maxTmp = maxObj.GetComponent<TMPro.TextMeshProUGUI>();
+                        if (maxTmp != null) maxTmp.alignment = TMPro.TextAlignmentOptions.Center;
                     }
 
                     xOffset += iconSize + 3f;
@@ -4271,7 +4221,7 @@ namespace VSItemTooltips
         /// Shows evolutions for passive items (items that don't evolve themselves but enable other weapons to evolve).
         /// This handles WeaponType values like DURATION (Spellbinder), MAGNET (Attractorb), etc.
         /// </summary>
-        private static float AddPassiveEvolutionSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, WeaponType passiveType, float yOffset, float maxWidth)
+        private static float AddPassiveEvolutionSection(UnityEngine.Transform parent, TMPro.TMP_FontAsset font, WeaponType passiveType, float yOffset, float maxWidth)
         {
             if (cachedWeaponsDict == null) return yOffset;
 
@@ -4363,7 +4313,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[AddPassiveEvo] Error: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[AddPassiveEvo] Error: {ex.Message}");
             }
 
             // Also include this passive's own evolution if it has one
@@ -4418,7 +4368,7 @@ namespace VSItemTooltips
             // Add section header
             yOffset -= Spacing;
             var headerObj = CreateTextElement(parent, "EvoHeader", "Evolutions: (click for details)", font, 14f,
-                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
+                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), TMPro.FontStyles.Bold);
             var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
             headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
             headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
@@ -4456,7 +4406,7 @@ namespace VSItemTooltips
 
                         // Plus sign
                         var plusObj = CreateTextElement(parent, $"Plus{formulaIndex}_{p}", "+", font, 14f,
-                            new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
+                            new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), TMPro.FontStyles.Bold);
                         var plusRect = plusObj.GetComponent<UnityEngine.RectTransform>();
                         plusRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                         plusRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
@@ -4478,15 +4428,15 @@ namespace VSItemTooltips
                         if (passive.RequiresMaxLevel)
                         {
                             var maxObj = CreateTextElement(parent, $"PassiveMax{formulaIndex}_{p}", "MAX", font, 9f,
-                                new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                                new UnityEngine.Color(1f, 0.85f, 0f, 1f), TMPro.FontStyles.Bold);
                             var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
                             maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                             maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
                             maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
                             maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
                             maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
-                            var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
-                            if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                            var maxTmp = maxObj.GetComponent<TMPro.TextMeshProUGUI>();
+                            if (maxTmp != null) maxTmp.alignment = TMPro.TextAlignmentOptions.Center;
                         }
 
                         xOffset += iconSize + 3f;
@@ -4495,7 +4445,7 @@ namespace VSItemTooltips
 
                 // Arrow
                 var arrowObj = CreateTextElement(parent, $"Arrow{formulaIndex}", "→", font, 14f,
-                    new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Normal);
+                    new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), TMPro.FontStyles.Normal);
                 var arrowRect = arrowObj.GetComponent<UnityEngine.RectTransform>();
                 arrowRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                 arrowRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
@@ -4515,7 +4465,7 @@ namespace VSItemTooltips
             return yOffset;
         }
 
-        private static float AddItemEvolutionSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font, ItemType itemType, float yOffset, float maxWidth)
+        private static float AddItemEvolutionSection(UnityEngine.Transform parent, TMPro.TMP_FontAsset font, ItemType itemType, float yOffset, float maxWidth)
         {
             // For items/powerups, find ALL weapons that use this item to evolve
             if (cachedWeaponsDict == null)
@@ -4627,7 +4577,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[AddItemEvo] Error: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[AddItemEvo] Error: {ex.Message}");
             }
 
 
@@ -4636,7 +4586,7 @@ namespace VSItemTooltips
             // Add section header
             yOffset -= Spacing;
             var headerObj = CreateTextElement(parent, "EvoHeader", "Evolutions: (click for details)", font, 14f,
-                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), Il2CppTMPro.FontStyles.Bold);
+                new UnityEngine.Color(0.9f, 0.75f, 0.3f, 1f), TMPro.FontStyles.Bold);
             var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
             headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
             headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
@@ -4670,7 +4620,7 @@ namespace VSItemTooltips
 
                         // Plus sign
                         var plusObj = CreateTextElement(parent, $"Plus{formulaIndex}_{p}", "+", font, 14f,
-                            new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Bold);
+                            new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), TMPro.FontStyles.Bold);
                         var plusRect = plusObj.GetComponent<UnityEngine.RectTransform>();
                         plusRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                         plusRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
@@ -4692,15 +4642,15 @@ namespace VSItemTooltips
                         if (passive.RequiresMaxLevel)
                         {
                             var maxObj = CreateTextElement(parent, $"Max{formulaIndex}_{p}", "MAX", font, 9f,
-                                new UnityEngine.Color(1f, 0.85f, 0f, 1f), Il2CppTMPro.FontStyles.Bold);
+                                new UnityEngine.Color(1f, 0.85f, 0f, 1f), TMPro.FontStyles.Bold);
                             var maxRect = maxObj.GetComponent<UnityEngine.RectTransform>();
                             maxRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                             maxRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
                             maxRect.pivot = new UnityEngine.Vector2(0.5f, 1f);
                             maxRect.anchoredPosition = new UnityEngine.Vector2(xOffset + iconSize / 2f, yOffset - iconSize);
                             maxRect.sizeDelta = new UnityEngine.Vector2(iconSize, 12f);
-                            var maxTmp = maxObj.GetComponent<Il2CppTMPro.TextMeshProUGUI>();
-                            if (maxTmp != null) maxTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Center;
+                            var maxTmp = maxObj.GetComponent<TMPro.TextMeshProUGUI>();
+                            if (maxTmp != null) maxTmp.alignment = TMPro.TextAlignmentOptions.Center;
                         }
 
                         xOffset += iconSize + 3f;
@@ -4709,7 +4659,7 @@ namespace VSItemTooltips
 
                 // Arrow
                 var arrowObj = CreateTextElement(parent, $"Arrow{formulaIndex}", "→", font, 14f,
-                    new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), Il2CppTMPro.FontStyles.Normal);
+                    new UnityEngine.Color(0.8f, 0.8f, 0.8f, 1f), TMPro.FontStyles.Normal);
                 var arrowRect = arrowObj.GetComponent<UnityEngine.RectTransform>();
                 arrowRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                 arrowRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
@@ -4725,7 +4675,7 @@ namespace VSItemTooltips
 
                 // Evolution name
                 var nameObj = CreateTextElement(parent, $"EvoName{formulaIndex}", formula.EvolvedName, font, 11f,
-                    new UnityEngine.Color(0.75f, 0.75f, 0.8f, 1f), Il2CppTMPro.FontStyles.Normal);
+                    new UnityEngine.Color(0.75f, 0.75f, 0.8f, 1f), TMPro.FontStyles.Normal);
                 var nameRect = nameObj.GetComponent<UnityEngine.RectTransform>();
                 nameRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                 nameRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
@@ -4740,7 +4690,7 @@ namespace VSItemTooltips
             return yOffset;
         }
 
-        private static float AddArcanaSection(UnityEngine.Transform parent, Il2CppTMPro.TMP_FontAsset font,
+        private static float AddArcanaSection(UnityEngine.Transform parent, TMPro.TMP_FontAsset font,
             List<ArcanaInfo> arcanas, float yOffset, float maxWidth)
         {
             if (arcanas == null || arcanas.Count == 0) return yOffset;
@@ -4748,7 +4698,7 @@ namespace VSItemTooltips
             // Section header
             yOffset -= Spacing;
             var headerObj = CreateTextElement(parent, "ArcanaHeader", "Arcana: (click for details)", font, 14f,
-                new UnityEngine.Color(0.7f, 0.5f, 0.9f, 1f), Il2CppTMPro.FontStyles.Bold);
+                new UnityEngine.Color(0.7f, 0.5f, 0.9f, 1f), TMPro.FontStyles.Bold);
             var headerRect = headerObj.GetComponent<UnityEngine.RectTransform>();
             headerRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
             headerRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
@@ -4769,7 +4719,7 @@ namespace VSItemTooltips
 
                 // Add arcana name next to icon, vertically centered
                 var nameObj = CreateTextElement(parent, $"ArcanaName{i}", arcana.Name, font, 13f,
-                    new UnityEngine.Color(0.8f, 0.7f, 0.95f, 1f), Il2CppTMPro.FontStyles.Normal);
+                    new UnityEngine.Color(0.8f, 0.7f, 0.95f, 1f), TMPro.FontStyles.Normal);
                 var nameRect = nameObj.GetComponent<UnityEngine.RectTransform>();
                 nameRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                 nameRect.anchorMax = new UnityEngine.Vector2(0f, 1f);
@@ -4891,17 +4841,17 @@ namespace VSItemTooltips
                 titleTextRect.offsetMin = new UnityEngine.Vector2(IconSize + Spacing, 0f);
                 titleTextRect.offsetMax = UnityEngine.Vector2.zero;
 
-                var titleTmp = titleText.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                var titleTmp = titleText.AddComponent<TMPro.TextMeshProUGUI>();
                 titleTmp.font = font;
                 titleTmp.text = arcanaName;
                 titleTmp.fontSize = 20f;
-                titleTmp.fontStyle = Il2CppTMPro.FontStyles.Bold;
+                titleTmp.fontStyle = TMPro.FontStyles.Bold;
                 titleTmp.color = new UnityEngine.Color(0.8f, 0.7f, 0.95f, 1f); // Purple-ish for arcana
-                titleTmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+                titleTmp.alignment = TMPro.TextAlignmentOptions.Left;
                 titleTmp.enableAutoSizing = true;
                 titleTmp.fontSizeMin = 12f;
                 titleTmp.fontSizeMax = 20f;
-                titleTmp.overflowMode = Il2CppTMPro.TextOverflowModes.Ellipsis;
+                titleTmp.overflowMode = TMPro.TextOverflowModes.Ellipsis;
 
                 // Arcana icon
                 if (arcanaSprite != null)
@@ -4936,14 +4886,14 @@ namespace VSItemTooltips
                     float descWidth = maxWidth - Padding * 2;
                     descRect.sizeDelta = new UnityEngine.Vector2(descWidth, 0f);
 
-                    var descTmp = descObj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+                    var descTmp = descObj.AddComponent<TMPro.TextMeshProUGUI>();
                     descTmp.font = font;
                     descTmp.text = arcanaDesc;
                     descTmp.fontSize = 14f;
                     descTmp.color = new UnityEngine.Color(0.85f, 0.85f, 0.9f, 1f);
-                    descTmp.alignment = Il2CppTMPro.TextAlignmentOptions.TopLeft;
+                    descTmp.alignment = TMPro.TextAlignmentOptions.TopLeft;
                     descTmp.enableWordWrapping = true;
-                    descTmp.overflowMode = Il2CppTMPro.TextOverflowModes.Truncate;
+                    descTmp.overflowMode = TMPro.TextOverflowModes.Truncate;
                     descTmp.rectTransform.sizeDelta = new UnityEngine.Vector2(descWidth, 0f);
 
                     var descFitter = descObj.AddComponent<UnityEngine.UI.ContentSizeFitter>();
@@ -4966,7 +4916,7 @@ namespace VSItemTooltips
                 {
                     yOffset -= Spacing;
                     var affectsHeader = CreateTextElement(popup.transform, "AffectsHeader", "Affects: (click for details)", font, 14f,
-                        new UnityEngine.Color(0.7f, 0.5f, 0.9f, 1f), Il2CppTMPro.FontStyles.Bold);
+                        new UnityEngine.Color(0.7f, 0.5f, 0.9f, 1f), TMPro.FontStyles.Bold);
                     var affectsRect = affectsHeader.GetComponent<UnityEngine.RectTransform>();
                     affectsRect.anchorMin = new UnityEngine.Vector2(0f, 1f);
                     affectsRect.anchorMax = new UnityEngine.Vector2(1f, 1f);
@@ -5057,19 +5007,19 @@ namespace VSItemTooltips
         }
 
         private static UnityEngine.GameObject CreateTextElement(UnityEngine.Transform parent, string name, string text,
-            Il2CppTMPro.TMP_FontAsset font, float fontSize, UnityEngine.Color color, Il2CppTMPro.FontStyles style)
+            TMPro.TMP_FontAsset font, float fontSize, UnityEngine.Color color, TMPro.FontStyles style)
         {
             var obj = new UnityEngine.GameObject(name);
             obj.transform.SetParent(parent, false);
             obj.AddComponent<UnityEngine.RectTransform>();
 
-            var tmp = obj.AddComponent<Il2CppTMPro.TextMeshProUGUI>();
+            var tmp = obj.AddComponent<TMPro.TextMeshProUGUI>();
             tmp.font = font;
             tmp.text = text;
             tmp.fontSize = fontSize;
             tmp.color = color;
             tmp.fontStyle = style;
-            tmp.alignment = Il2CppTMPro.TextAlignmentOptions.Left;
+            tmp.alignment = TMPro.TextAlignmentOptions.Left;
 
             return obj;
         }
@@ -5236,7 +5186,7 @@ namespace VSItemTooltips
                     mouseOverPopupIndex = -1;
                 }
                 // Start delayed hide check for this popup level
-                MelonLoader.MelonCoroutines.Start(DelayedStackHideCheck(thisPopupIndex));
+                _hideCheckTime = UnityEngine.Time.time + 0.1f;
             }));
             eventTrigger.triggers.Add(exitEntry);
         }
@@ -5422,7 +5372,7 @@ namespace VSItemTooltips
                 var arcanaData = GetArcanaData(arcanaType);
                 if (arcanaData == null)
                 {
-                    MelonLogger.Warning($"[CollectionPopup] Could not get arcana data for {arcanaType}");
+                    ItemTooltipsMod.ModLogger.LogWarning($"[CollectionPopup] Could not get arcana data for {arcanaType}");
                     return;
                 }
                 collectionPopup = CreateArcanaPopup(popupParent, arcanaData);
@@ -5717,7 +5667,7 @@ namespace VSItemTooltips
                 exitEntry.eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit;
                 exitEntry.callback.AddListener((UnityEngine.Events.UnityAction<UnityEngine.EventSystems.BaseEventData>)((data) =>
                 {
-                    MelonLoader.MelonCoroutines.Start(DelayedHideCheck());
+                    _hideCheckTime = UnityEngine.Time.time + 0.1f;
                 }));
                 eventTrigger.triggers.Add(exitEntry);
             }
@@ -5762,12 +5712,23 @@ namespace VSItemTooltips
             {
                 var dictType = cachedPowerUpsDict.GetType();
                 var containsMethod = dictType.GetMethod("ContainsKey");
-                if (containsMethod != null && (bool)containsMethod.Invoke(cachedPowerUpsDict, new object[] { type }))
+                
+                // Convert ItemType to PowerUpType for the dictionary lookup
+                object powerUpKey = null;
+                try 
+                {
+                    powerUpKey = Enum.Parse(typeof(VampireSurvivors.Data.PowerUpType), type.ToString());
+                }
+                catch { }
+
+                if (powerUpKey == null) return null;
+
+                if (containsMethod != null && (bool)containsMethod.Invoke(cachedPowerUpsDict, new object[] { powerUpKey }))
                 {
                     var indexer = dictType.GetProperty("Item");
                     if (indexer != null)
                     {
-                        var listObj = indexer.GetValue(cachedPowerUpsDict, new object[] { type });
+                        var listObj = indexer.GetValue(cachedPowerUpsDict, new object[] { powerUpKey });
                         // Dictionary value is List<PowerUpData>, get the first item
                         if (listObj != null)
                         {
@@ -5853,12 +5814,12 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error creating circle sprite: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error creating circle sprite: {ex.Message}");
                 return null;
             }
         }
 
-        private static UnityEngine.Sprite LoadSpriteFromAtlas(string frameName, string atlasName)
+                private static UnityEngine.Sprite LoadSpriteFromAtlas(string frameName, string atlasName)
         {
             try
             {
@@ -5867,24 +5828,33 @@ namespace VSItemTooltips
                 {
                     foreach (var assembly in System.AppDomain.CurrentDomain.GetAssemblies())
                     {
-                        spriteManagerType = assembly.GetTypes().FirstOrDefault(t => t.Name == "SpriteManager");
-                        if (spriteManagerType != null)
-                        {
-                            if (!spriteManagerDebugLogged)
+                        if (!assembly.FullName.Contains("VampireSurvivors")) continue;
+                        try {
+                            spriteManagerType = assembly.GetTypes().FirstOrDefault(t => t.Name == "SpriteManager");
+                            if (spriteManagerType != null)
                             {
-                                spriteManagerDebugLogged = true;
+                                break;
                             }
-                            break;
-                        }
-                    }
-                    if (spriteManagerType == null && !spriteManagerDebugLogged)
-                    {
-                        MelonLogger.Warning("[LoadSpriteFromAtlas] SpriteManager type not found!");
-                        spriteManagerDebugLogged = true;
+                        } catch { }
                     }
                 }
 
-                if (spriteManagerType == null) return null;
+                if (spriteManagerType == null) {
+                    if (!spriteManagerDebugLogged) {
+                        ItemTooltipsMod.ModLogger.LogWarning("[LoadSpriteFromAtlas] SpriteManager type not found!");
+                        spriteManagerDebugLogged = true;
+                    }
+                    return null;
+                }
+
+                if (!spriteManagerDebugLogged) {
+                    spriteManagerDebugLogged = true;
+                    ItemTooltipsMod.ModLogger.LogInfo("SpriteManager methods:");
+                    foreach (var m in spriteManagerType.GetMethods()) {
+                        string pStr = string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name));
+                        ItemTooltipsMod.ModLogger.LogInfo($" - {m.Name}({pStr})");
+                    }
+                }
 
                 var getSpriteFastMethod = spriteManagerType.GetMethod("GetSpriteFast",
                     BindingFlags.Public | BindingFlags.Static,
@@ -5904,9 +5874,11 @@ namespace VSItemTooltips
                         result = getSpriteFastMethod.Invoke(null, new object[] { nameWithoutExt, atlasName }) as UnityEngine.Sprite;
                     }
                     return result;
+                } else {
+                    ItemTooltipsMod.ModLogger.LogWarning("GetSpriteFast method not found!");
                 }
             }
-            catch { }
+            catch (Exception ex) { ItemTooltipsMod.ModLogger.LogError("Error in LoadSpriteFromAtlas: " + ex.ToString()); }
             return null;
         }
 
@@ -5952,7 +5924,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[GetSpriteForWeapon] Error: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[GetSpriteForWeapon] Error: {ex.Message}");
             }
             return null;
         }
@@ -5988,23 +5960,29 @@ namespace VSItemTooltips
             return null;
         }
 
-        private static T GetPropertyValue<T>(object obj, string propertyName)
+        private static T GetPropertyValue<T>(object obj, string propertyName) { if (obj == null) return default; try { var prop = obj.GetType().GetProperty(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance); if (prop != null) return (T)prop.GetValue(obj); var field = obj.GetType().GetField(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance); if (field != null) return (T)field.GetValue(obj); } catch { } return default; } private static string GetPropertyValueString(object obj, string propertyName)
         {
-            if (obj == null) return default;
+            if (obj == null) return null;
 
             try
             {
                 var prop = obj.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
                 if (prop != null)
-                    return (T)prop.GetValue(obj);
+                {
+                    var val = prop.GetValue(obj, null);
+                    if (val != null) return val.ToString();
+                }
 
                 var field = obj.GetType().GetField(propertyName, BindingFlags.Public | BindingFlags.Instance);
                 if (field != null)
-                    return (T)field.GetValue(obj);
+                {
+                    var val = field.GetValue(obj);
+                    if (val != null) return val.ToString();
+                }
             }
             catch { }
 
-            return default;
+            return null;
         }
 
         private static string GetLocalizedWeaponDescription(WeaponData data, WeaponType type)
@@ -6017,7 +5995,8 @@ namespace VSItemTooltips
                 var termMethod = data.GetType().GetMethod("GetLocalizedDescriptionTerm", BindingFlags.Public | BindingFlags.Instance);
                 if (termMethod != null)
                 {
-                    var term = termMethod.Invoke(data, new object[] { type }) as string;
+                    var termObj = termMethod.Invoke(data, new object[] { type });
+                    var term = termObj?.ToString();
                     if (!string.IsNullOrEmpty(term))
                     {
                         var translated = GetI2Translation(term);
@@ -6042,7 +6021,8 @@ namespace VSItemTooltips
                 var method = data.GetType().GetMethod("GetLocalizedNameTerm", BindingFlags.Public | BindingFlags.Instance);
                 if (method != null)
                 {
-                    var term = method.Invoke(data, new object[] { type }) as string;
+                    var termObj = method.Invoke(data, new object[] { type });
+                    var term = termObj?.ToString();
                     if (!string.IsNullOrEmpty(term))
                     {
                         var translated = GetI2Translation(term);
@@ -6051,6 +6031,8 @@ namespace VSItemTooltips
                 }
             }
             catch { }
+            
+            // For weapons, we can just access .name since it's strongly typed
             return data.name ?? type.ToString();
         }
 
@@ -6067,12 +6049,13 @@ namespace VSItemTooltips
                     // Need to convert ItemType to the parameter type the method expects
                     var paramType = method.GetParameters()[0].ParameterType;
                     object convertedType = Enum.ToObject(paramType, (int)type);
-                    var result = method.Invoke(data, new object[] { convertedType }) as string;
+                    var resultObj = method.Invoke(data, new object[] { convertedType });
+                    var result = resultObj?.ToString();
                     if (!string.IsNullOrEmpty(result)) return result;
                 }
             }
             catch { }
-            return GetPropertyValue<string>(data, "description") ?? "";
+            return GetPropertyValueString(data, "description") ?? "";
         }
 
         private static string GetLocalizedPowerUpName(object data, ItemType type)
@@ -6085,7 +6068,8 @@ namespace VSItemTooltips
                 {
                     var paramType = method.GetParameters()[0].ParameterType;
                     object convertedType = Enum.ToObject(paramType, (int)type);
-                    var result = method.Invoke(data, new object[] { convertedType }) as string;
+                    var resultObj = method.Invoke(data, new object[] { convertedType });
+                    var result = resultObj?.ToString();
                     if (!string.IsNullOrEmpty(result)) return result;
                 }
             }
@@ -6098,7 +6082,7 @@ namespace VSItemTooltips
             if (string.IsNullOrEmpty(term)) return null;
             try
             {
-                var locType = System.Type.GetType("Il2CppI2.Loc.LocalizationManager, Il2Cppl2localization");
+                var locType = System.Type.GetType("I2.Loc.LocalizationManager, l2localization");
                 if (locType != null)
                 {
                     var method = locType.GetMethod("GetTranslation", BindingFlags.Public | BindingFlags.Static);
@@ -6113,10 +6097,10 @@ namespace VSItemTooltips
             return null;
         }
 
-        private static Il2CppTMPro.TMP_FontAsset GetFont()
+        private static TMPro.TMP_FontAsset GetFont()
         {
             // Try to find an existing TMP text component to get its font
-            var existingTmp = UnityEngine.Object.FindObjectOfType<Il2CppTMPro.TextMeshProUGUI>();
+            var existingTmp = UnityEngine.Object.FindObjectOfType<TMPro.TextMeshProUGUI>();
             return existingTmp?.font;
         }
 
@@ -6350,7 +6334,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[Arcana] Error getting active arcanas: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[Arcana] Error getting active arcanas: {ex.Message}");
             }
 
             return result;
@@ -6621,7 +6605,7 @@ namespace VSItemTooltips
             }
             catch { }
 
-            MelonLogger.Warning($"[Arcana] GetArcanaTypeInt failed for type {arcanaType.GetType().FullName}, value: {arcanaType}");
+            ItemTooltipsMod.ModLogger.LogWarning($"[Arcana] GetArcanaTypeInt failed for type {arcanaType.GetType().FullName}, value: {arcanaType}");
             return -1;
         }
 
@@ -6637,7 +6621,7 @@ namespace VSItemTooltips
             {
 
                 // Find TextMeshProUGUI components with the arcana's name
-                var allTmps = UnityEngine.Object.FindObjectsOfType<Il2CppTMPro.TextMeshProUGUI>();
+                var allTmps = UnityEngine.Object.FindObjectsOfType<TMPro.TextMeshProUGUI>();
                 UnityEngine.Transform cardContainer = null;
 
                 // Strip rich text for matching - extract plain text name
@@ -6729,7 +6713,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[Arcana] Error scanning arcana UI: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[Arcana] Error scanning arcana UI: {ex.Message}");
             }
         }
 
@@ -6819,7 +6803,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[Arcana] Error capturing weapon from patch: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[Arcana] Error capturing weapon from patch: {ex.Message}");
             }
         }
 
@@ -6831,7 +6815,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[Arcana] Error capturing item from patch: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[Arcana] Error capturing item from patch: {ex.Message}");
             }
         }
 
@@ -6910,7 +6894,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[Arcana] Error getting arcanas for weapon {weaponType}: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[Arcana] Error getting arcanas for weapon {weaponType}: {ex.Message}");
             }
             return result;
         }
@@ -6975,7 +6959,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[Arcana] Error getting arcanas for item {itemType}: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[Arcana] Error getting arcanas for item {itemType}: {ex.Message}");
             }
             return result;
         }
@@ -7002,7 +6986,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Error($"Error in LevelUpPage.Show patch: {ex}");
+                ItemTooltipsMod.ModLogger.LogError($"Error in LevelUpPage.Show patch: {ex}");
             }
         }
 
@@ -7032,7 +7016,7 @@ namespace VSItemTooltips
                     }
                     catch (Exception ex)
                     {
-                        MelonLogger.Warning($"Error accessing {name} property: {ex.Message}");
+                        ItemTooltipsMod.ModLogger.LogWarning($"Error accessing {name} property: {ex.Message}");
                     }
                 }
 
@@ -7051,7 +7035,7 @@ namespace VSItemTooltips
                     }
                     catch (Exception ex)
                     {
-                        MelonLogger.Warning($"Error accessing {name} field: {ex.Message}");
+                        ItemTooltipsMod.ModLogger.LogWarning($"Error accessing {name} field: {ex.Message}");
                     }
                 }
             }
@@ -7074,7 +7058,7 @@ namespace VSItemTooltips
                 }
             }
 
-            MelonLogger.Warning("Could not find GameSession in LevelUpPage!");
+            ItemTooltipsMod.ModLogger.LogWarning("Could not find GameSession in LevelUpPage!");
         }
 
         private static bool ValidateGameSession(object session)
@@ -7100,7 +7084,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in page Show patch: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in page Show patch: {ex.Message}");
             }
         }
 
@@ -7167,7 +7151,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in generic weapon patch: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in generic weapon patch: {ex.Message}");
             }
         }
 
@@ -7190,7 +7174,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in generic item patch: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in generic item patch: {ex.Message}");
             }
         }
 
@@ -7221,7 +7205,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in generic weapon patch (arg1): {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in generic weapon patch (arg1): {ex.Message}");
             }
         }
 
@@ -7252,7 +7236,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in generic item patch (arg1): {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in generic item patch (arg1): {ex.Message}");
             }
         }
 
@@ -7290,7 +7274,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in generic weapon patch (argN): {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in generic weapon patch (argN): {ex.Message}");
             }
         }
 
@@ -7329,7 +7313,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in generic item patch (argN): {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in generic item patch (argN): {ex.Message}");
             }
         }
 
@@ -7355,7 +7339,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in generic arcana patch (argN): {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in generic arcana patch (argN): {ex.Message}");
             }
         }
 
@@ -7529,7 +7513,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[TryCacheSessionFromCharacter] Error: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"[TryCacheSessionFromCharacter] Error: {ex.Message}");
             }
         }
 
@@ -7711,7 +7695,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in EquipmentIcon patch: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in EquipmentIcon patch: {ex.Message}");
             }
         }
     }
@@ -7745,7 +7729,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in SetWeaponData patch: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in SetWeaponData patch: {ex.Message}");
             }
         }
 
@@ -7775,7 +7759,7 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error in SetItemData patch: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error in SetItemData patch: {ex.Message}");
             }
         }
 
@@ -7846,10 +7830,50 @@ namespace VSItemTooltips
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"Error caching session from page: {ex.Message}");
+                ItemTooltipsMod.ModLogger.LogWarning($"Error caching session from page: {ex.Message}");
             }
         }
     }
 
     #endregion
+    
+    public class ItemTooltipsModBehaviour : UnityEngine.MonoBehaviour
+    {
+        public ItemTooltipsModBehaviour(System.IntPtr ptr) : base(ptr) { }
+
+        private void Update()
+        {
+            ItemTooltipsMod.OnUpdate();
+        }
+
+        private void OnLevelWasLoaded(int level)
+        {
+            ItemTooltipsMod.OnSceneWasLoaded(level, "");
+        }
+    }
 }
+
+namespace System.Runtime.CompilerServices
+{
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Event | AttributeTargets.Field | AttributeTargets.GenericParameter | AttributeTargets.Parameter | AttributeTargets.Property | AttributeTargets.ReturnValue, AllowMultiple = false, Inherited = false)]
+    public sealed class NullableAttribute : Attribute
+    {
+        public readonly byte[] NullableFlags;
+        public NullableAttribute(byte flag) { NullableFlags = new byte[] { flag }; }
+        public NullableAttribute(byte[] flags) { NullableFlags = flags; }
+    }
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method | AttributeTargets.Interface | AttributeTargets.Delegate, AllowMultiple = false, Inherited = false)]
+    public sealed class NullableContextAttribute : Attribute
+    {
+        public readonly byte Flag;
+        public NullableContextAttribute(byte flag) { Flag = flag; }
+    }
+}
+
+
+
+
+
+
+
+

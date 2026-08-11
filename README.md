@@ -66,6 +66,10 @@ Tooltips work on every screen where weapon/item icons appear:
 - MelonLoader v0.7+
 - Works with all DLCs
 
+## Known Issues
+
+- Tooltips on "Map Item Pickups" (items found physically sitting on the map rather than from chests or level-ups) may not display reliably due to the game's UI hierarchy layering invisible, full-screen hit-blockers over those specific windows.
+
 ## Building from Source
 
 Requires .NET SDK and a local Vampire Survivors installation with MelonLoader (for assembly references).
