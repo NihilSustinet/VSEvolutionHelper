@@ -1,6 +1,6 @@
 # VS Item Tooltips
 
-A [MelonLoader](https://melonwiki.xyz/) mod for [Vampire Survivors](https://store.steampowered.com/app/1794680/Vampire_Survivors/) that adds rich, interactive tooltips to weapon and item icons throughout the game. Supports mouse, keyboard, and controller with full navigation.
+A [BepInEx (Bleeding Edge)](https://builds.bepinex.dev/projects/bepinex_be) mod for [Vampire Survivors](https://store.steampowered.com/app/1794680/Vampire_Survivors/) that adds rich, interactive tooltips to weapon and item icons throughout the game. Supports mouse, keyboard, and controller with full navigation.
 
 If you enjoy this mod, consider supporting me!
 
@@ -32,11 +32,11 @@ Tooltips work on every screen where weapon/item icons appear:
 
 ## Installation
 
-1. Install the latest [MelonLoader nightly build](https://nightly.link/LavaGang/MelonLoader/workflows/build/alpha-development/MelonLoader.Installer.exe.zip) for Vampire Survivors
+1. Install the latest [BepInEx Bleeding Edge (IL2CPP) build](https://builds.bepinex.dev/projects/bepinex_be) for Vampire Survivors
 2. Download `VSEvolutionHelper.dll` from the [latest release](https://github.com/NihilXD/VSEvolutionHelper/releases/latest)
-3. Copy the DLL to your Vampire Survivors `Mods` folder:
+3. Copy the DLL to your Vampire Survivors `BepInEx/plugins` folder:
    ```
-   <Steam>/steamapps/common/Vampire Survivors/Mods/VSEvolutionHelper.dll
+   <Steam>/steamapps/common/Vampire Survivors/BepInEx/plugins/VSEvolutionHelper.dll
    ```
 4. Launch the game
 
@@ -63,7 +63,7 @@ Tooltips work on every screen where weapon/item icons appear:
 ## Compatibility
 
 - Vampire Survivors v1.14+
-- MelonLoader v0.7+
+- BepInEx Bleeding Edge (IL2CPP)
 - Works with all DLCs
 
 ## Known Issues
@@ -72,7 +72,7 @@ Tooltips work on every screen where weapon/item icons appear:
 
 ## Building from Source
 
-Requires .NET SDK and a local Vampire Survivors installation with MelonLoader (for assembly references).
+Requires .NET SDK and a local Vampire Survivors installation with BepInEx (for assembly references).
 
 ```bash
 dotnet build VSEvolutionHelper.csproj
