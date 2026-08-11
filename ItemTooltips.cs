@@ -20,7 +20,7 @@ namespace VSItemTooltips
     /// Instead of patching specific UI windows, this hooks into any Image component
     /// that displays a weapon/item sprite and makes it hoverable.
     /// </summary>
-    [BepInPlugin("com.NihilXD.VSItemTooltips", "VS Item Tooltips", "1.2.0")]
+    [BepInPlugin("com.NihilXD.VSItemTooltips", "VS Item Tooltips", "1.2.1")]
     public class ItemTooltipsMod : BasePlugin
     {
         private static HarmonyLib.Harmony harmonyInstance;
