@@ -68,7 +68,7 @@ Tooltips work on every screen where weapon/item icons appear:
 
 ## Known Issues
 
-- Tooltips on "Map Item Pickups" (items found physically sitting on the map rather than from chests or level-ups) may not display reliably due to the game's UI hierarchy layering invisible, full-screen hit-blockers over those specific windows.
+- Tooltips on "Map Item Pickups" (items found physically sitting on the map rather than from chests or level-ups) are not currently working.
 
 ## Building from Source
 
