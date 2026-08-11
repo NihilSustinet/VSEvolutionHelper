@@ -62,7 +62,7 @@ Tooltips work on every screen where weapon/item icons appear:
 
 ## Compatibility
 
-- Vampire Survivors v1.14+
+- Vampire Survivors v1.14+ (Developed and tested for public beta version 1.16.101)
 - BepInEx Bleeding Edge (IL2CPP)
 - Works with all DLCs
 
